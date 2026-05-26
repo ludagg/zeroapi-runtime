@@ -1,7 +1,9 @@
 import { Hono } from 'hono'
 import { randomUUID } from 'crypto'
 import type { Context, MiddlewareHandler } from 'hono'
-import type { ZeroAPISpec, ResourceDefinition, CrudAction } from '../types/spec.js'
+import type { ZeroAPISpec, ResourceDefinition, CrudAction, CustomEndpointDef } from '../types/spec.js'
+import type { DataStore, ResourceStore } from '../types/store.js'
+import type { HandlerFn } from '../hooks/types.js'
 import { generateZodSchemas } from './validation.js'
 import { createPermissionMiddleware } from '../rbac/permissions.js'
 import { parseQueryParams } from '../query/builder.js'
@@ -10,9 +12,9 @@ import { applyIncludes, extractNestedRelations, persistNestedRelations } from '.
 import { executeTransaction } from '../transactions/executor.js'
 import { processFileFields } from '../upload/index.js'
 import { toPlural } from '../utils/plural.js'
+import { executeHook } from '../hooks/runner.js'
 
-export type ResourceStore = Map<string, Record<string, unknown>>
-export type DataStore = Map<string, ResourceStore>
+export type { DataStore, ResourceStore }
 
 const DEFAULT_ENDPOINTS: CrudAction[] = ['list', 'create', 'read', 'update', 'delete']
 
@@ -43,11 +45,24 @@ function buildGuard(
   return composeGuard(guards)
 }
 
+function buildCustomGuard(
+  endpoint: CustomEndpointDef,
+  spec: ZeroAPISpec,
+  globalAuth?: MiddlewareHandler
+): MiddlewareHandler | null {
+  const guards: MiddlewareHandler[] = []
+  if ((endpoint.auth || (endpoint.roles?.length ?? 0) > 0) && globalAuth) {
+    guards.push(globalAuth)
+  }
+  if (endpoint.roles?.length) guards.push(createPermissionMiddleware(endpoint.roles, spec))
+  return composeGuard(guards)
+}
+
 type RouteHandler = (c: Context) => Response | Promise<Response>
 
 function mount(
   router: Hono,
-  method: 'get' | 'post' | 'put' | 'delete',
+  method: 'get' | 'post' | 'put' | 'delete' | 'patch',
   path: string,
   guard: MiddlewareHandler | null,
   handler: RouteHandler
@@ -105,7 +120,8 @@ function registerResource(
   store: DataStore,
   spec: ZeroAPISpec,
   authMiddleware?: MiddlewareHandler,
-  uploadDir?: string
+  uploadDir?: string,
+  handlers: Record<string, HandlerFn> = {}
 ): void {
   const endpoints: CrudAction[] = resource.endpoints ?? DEFAULT_ENDPOINTS
   const schemas   = generateZodSchemas(resource)
@@ -132,7 +148,33 @@ function registerResource(
     })
   }
 
-  // CREATE — file upload, nested relations, transactions
+  // CUSTOM ENDPOINTS — registered before /:id to take priority in RegExpRouter
+  for (const endpoint of resource.customEndpoints ?? []) {
+    const method = endpoint.method.toLowerCase() as 'get' | 'post' | 'put' | 'delete' | 'patch'
+    const guard = buildCustomGuard(endpoint, spec, authMiddleware)
+    mount(router, method, endpoint.path, guard, async (c) => {
+      const fn = handlers[endpoint.handler]
+      if (!fn) return c.json({ error: `Handler "${endpoint.handler}" not registered` }, 501)
+
+      let input: Record<string, unknown> = {}
+      try {
+        if (method !== 'get' && method !== 'delete') {
+          input = await c.req.json() as Record<string, unknown>
+        }
+      } catch { /* GET/DELETE have no body — ignore parse errors */ }
+
+      try {
+        const result = await fn({ input, ctx: c, store, services: {} })
+        if (result instanceof Response) return result
+        return c.json({ data: result ?? null })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return c.json({ error: message }, 400)
+      }
+    })
+  }
+
+  // CREATE — file upload, nested relations, transactions, hooks
   if (endpoints.includes('create')) {
     mount(router, 'post', '/', writeGuard, async (c) => {
       const read = await readBody(c, resource, uploadDir)
@@ -140,6 +182,16 @@ function registerResource(
 
       // Extract nested manyToMany data before validation
       const { body: cleanBody, nested } = extractNestedRelations(read.data, resource)
+
+      // beforeCreate hook — can throw to cancel, can mutate cleanBody
+      if (resource.hooks?.beforeCreate) {
+        try {
+          await executeHook(resource.hooks.beforeCreate, handlers, cleanBody, c, store)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          return c.json({ error: 'Hook rejected request', details: message }, 400)
+        }
+      }
 
       // Validate primary fields only
       const fileFieldKeys = Object.entries(resource.fields)
@@ -192,6 +244,13 @@ function registerResource(
         }
       }
 
+      // afterCreate hook — fire-and-forget (failure does not roll back)
+      if (resource.hooks?.afterCreate) {
+        try {
+          await executeHook(resource.hooks.afterCreate, handlers, { ...item }, c, store)
+        } catch { /* intentional: after-hooks do not cancel completed operations */ }
+      }
+
       return c.json({ data: item }, 201)
     })
   }
@@ -212,7 +271,7 @@ function registerResource(
     })
   }
 
-  // UPDATE — file upload, transactions
+  // UPDATE — file upload, transactions, hooks
   if (endpoints.includes('update')) {
     mount(router, 'put', '/:id', writeGuard, async (c) => {
       const id = c.req.param('id') ?? ''
@@ -224,6 +283,18 @@ function registerResource(
 
       const result = schemas.update.safeParse(read.data)
       if (!result.success) return validationError(c, result.error.issues)
+
+      const updateData: Record<string, unknown> = { ...(result.data as Record<string, unknown>) }
+
+      // beforeUpdate hook — can throw to cancel, can mutate updateData
+      if (resource.hooks?.beforeUpdate) {
+        try {
+          await executeHook(resource.hooks.beforeUpdate, handlers, updateData, c, store)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          return c.json({ error: 'Hook rejected request', details: message }, 400)
+        }
+      }
 
       const txConfig = resource.transactions?.find((t) => t.trigger === 'PUT')
       if (txConfig) {
@@ -242,20 +313,38 @@ function registerResource(
 
       const updated: Record<string, unknown> = {
         ...existing,
-        ...(result.data as Record<string, unknown>),
+        ...updateData,
         ...Object.fromEntries(fkFieldsUpd.map((k) => [k, read.data[k]]).filter(([, v]) => v != null)),
         updatedAt: new Date().toISOString(),
       }
       getStore().set(id, updated)
+
+      // afterUpdate hook — fire-and-forget
+      if (resource.hooks?.afterUpdate) {
+        try {
+          await executeHook(resource.hooks.afterUpdate, handlers, { ...updated }, c, store)
+        } catch { /* intentional */ }
+      }
+
       return c.json({ data: updated })
     })
   }
 
-  // DELETE — transactions
+  // DELETE — transactions, hooks
   if (endpoints.includes('delete')) {
     mount(router, 'delete', '/:id', deleteGuard, async (c) => {
       const id = c.req.param('id') ?? ''
       if (!getStore().has(id)) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+
+      // beforeDelete hook — can throw to cancel
+      if (resource.hooks?.beforeDelete) {
+        try {
+          await executeHook(resource.hooks.beforeDelete, handlers, { id }, c, store)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          return c.json({ error: 'Hook rejected request', details: message }, 400)
+        }
+      }
 
       const txConfig = resource.transactions?.find((t) => t.trigger === 'DELETE')
       if (txConfig) {
@@ -269,6 +358,14 @@ function registerResource(
       }
 
       getStore().delete(id)
+
+      // afterDelete hook — fire-and-forget
+      if (resource.hooks?.afterDelete) {
+        try {
+          await executeHook(resource.hooks.afterDelete, handlers, { id }, c, store)
+        } catch { /* intentional */ }
+      }
+
       return c.json({ data: null })
     })
   }
@@ -278,16 +375,18 @@ function registerResource(
 
 /**
  * Registers all resource routes on the Hono app.
- * Integrates: auth guards, RBAC, query builder, includes, transactions, file uploads.
+ * Integrates: auth guards, RBAC, query builder, includes, transactions, file uploads,
+ * lifecycle hooks, and custom endpoints.
  */
 export function generateRoutes(
   spec: ZeroAPISpec,
   app: Hono,
   store: DataStore,
   authMiddleware?: MiddlewareHandler,
-  uploadDir?: string
+  uploadDir?: string,
+  handlers: Record<string, HandlerFn> = {}
 ): void {
   for (const resource of spec.resources) {
-    registerResource(app, resource, store, spec, authMiddleware, uploadDir)
+    registerResource(app, resource, store, spec, authMiddleware, uploadDir, handlers)
   }
 }

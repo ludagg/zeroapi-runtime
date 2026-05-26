@@ -1,25 +1,7 @@
 import type { MiddlewareHandler } from 'hono'
 import type { RateLimitConfig } from '../types/spec.js'
-
-interface Bucket {
-  count: number
-  resetAt: number
-}
-
-function check(key: string, store: Map<string, Bucket>, config: RateLimitConfig): boolean {
-  const now = Date.now()
-  const entry = store.get(key)
-
-  if (!entry || now > entry.resetAt) {
-    store.set(key, { count: 1, resetAt: now + config.windowMs })
-    return true
-  }
-  if (entry.count >= config.max) {
-    return false
-  }
-  entry.count++
-  return true
-}
+import type { RateLimitStore } from '../ratelimit/store.js'
+import { MemoryRateLimitStore } from '../ratelimit/memoryStore.js'
 
 function extractJwtSub(authHeader: string): string | null {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
@@ -41,12 +23,15 @@ function extractJwtSub(authHeader: string): string | null {
 }
 
 /**
- * Creates an in-memory rate-limiting middleware.
- * Limits by client IP, and optionally also by JWT `sub` when byUser is true.
- * Returns 429 with a `retryAfter` hint when limits are exceeded.
+ * Creates a rate-limiting middleware backed by an abstract RateLimitStore.
+ * Defaults to MemoryRateLimitStore (in-process, dev-friendly).
+ * Pass a RedisRateLimitStore for multi-instance production deployments.
  */
-export function createRateLimitMiddleware(config: RateLimitConfig): MiddlewareHandler {
-  const store = new Map<string, Bucket>()
+export function createRateLimitMiddleware(
+  config: RateLimitConfig,
+  storeOverride?: RateLimitStore
+): MiddlewareHandler {
+  const store: RateLimitStore = storeOverride ?? new MemoryRateLimitStore()
 
   return async (c, next) => {
     const ip =
@@ -54,7 +39,8 @@ export function createRateLimitMiddleware(config: RateLimitConfig): MiddlewareHa
       c.req.header('x-real-ip') ??
       'unknown'
 
-    if (!check(`ip:${ip}`, store, config)) {
+    const { count } = await store.increment(`ip:${ip}`, config.windowMs)
+    if (count > config.max) {
       return c.json(
         {
           error: config.message ?? 'Too many requests — please slow down',
@@ -67,14 +53,17 @@ export function createRateLimitMiddleware(config: RateLimitConfig): MiddlewareHa
     if (config.byUser) {
       const auth = c.req.header('Authorization') ?? ''
       const sub = extractJwtSub(auth)
-      if (sub && !check(`user:${sub}`, store, config)) {
-        return c.json(
-          {
-            error: config.message ?? 'Rate limit exceeded for this user',
-            retryAfter: Math.ceil(config.windowMs / 1000),
-          },
-          429
-        )
+      if (sub) {
+        const { count: userCount } = await store.increment(`user:${sub}`, config.windowMs)
+        if (userCount > config.max) {
+          return c.json(
+            {
+              error: config.message ?? 'Rate limit exceeded for this user',
+              retryAfter: Math.ceil(config.windowMs / 1000),
+            },
+            429
+          )
+        }
       }
     }
 

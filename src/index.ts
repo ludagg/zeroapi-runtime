@@ -44,18 +44,41 @@ export { uploadFile, validateFile, parseMaxSize, processFileFields } from './upl
 export { uploadLocal } from './upload/providers/local.js'
 export { generatePresignedPutUrl } from './upload/providers/s3.js'
 
+// ── Hooks (Chantier 1) ────────────────────────────────────────────────────────
+export { executeHook } from './hooks/runner.js'
+export type { HandlerContext, HandlerFn } from './hooks/types.js'
+
+// ── Observability (Chantier 2) ────────────────────────────────────────────────
+export { createLogger } from './observability/logger.js'
+export { createRequestIdMiddleware } from './observability/requestId.js'
+export type { Logger, LogLevel } from './observability/logger.js'
+
+// ── Rate Limit Stores (Chantier 3) ────────────────────────────────────────────
+export { MemoryRateLimitStore } from './ratelimit/memoryStore.js'
+export { RedisRateLimitStore } from './ratelimit/redisStore.js'
+export type { RateLimitStore } from './ratelimit/store.js'
+export type { RedisLike } from './ratelimit/redisStore.js'
+
+// ── Env Validation (Chantier 4) ───────────────────────────────────────────────
+export { validateEnv, assertEnv } from './env/validate.js'
+export type { EnvValidationResult } from './env/validate.js'
+
+// ── Auth Flows (Chantier 5) ───────────────────────────────────────────────────
+export { mountAuthFlows } from './auth/flows/index.js'
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 export type {
   ZeroAPISpec, ResourceDefinition, FieldDefinition, FieldType, CrudAction,
-  AuthConfig, GlobalAuthConfig, ResourceHooks, HookConfig,
+  AuthConfig, GlobalAuthConfig, ResourceHooks, CustomEndpointDef, HttpMethod,
   RoleDefinition, ResourceRBAC, RateLimitConfig, CorsConfig, SecurityConfig,
   RelationDefinition, RelationType,
   TxOperation, TxAction, TransactionConfig,
+  AuthFlowsConfig, LockoutConfig,
 } from './types/spec.js'
 
 export type { RuntimeResult, RuntimeOptions } from './runtime/index.js'
 export type { ResourceSchemas } from './generators/validation.js'
-export type { DataStore, ResourceStore } from './generators/routes.js'
+export type { DataStore, ResourceStore } from './types/store.js'
 export type { OpenAPISpec } from './docs/swagger.js'
 export type { ParsedQuery, FilterMap, SortSpec, PaginationSpec } from './query/builder.js'
 export type { QueryResult } from './query/apply.js'

@@ -190,6 +190,22 @@ The runtime uses an in-memory `Map`-based store. All data is lost on process res
 
 The `local` storage provider writes files to `uploadDir` on the server filesystem and returns a `/uploads/<filename>` URL. You must serve that directory statically yourself (e.g. `app.use('/uploads', serveStatic({ root: uploadDir }))` with Hono's static middleware). The `s3`/`r2` providers return a presigned PUT URL — the client is responsible for the actual upload to the bucket.
 
+### 6. Auth flows use in-memory user store
+
+`POST /auth/register`, `/auth/login`, etc. persist users in-memory alongside the resource store. All session data (users, tokens, refresh tokens) is lost on restart. The `emailVerification` flow returns the token in the API response for testability; in production you would send the token via email. A persistent auth adapter (e.g. Prisma-backed) is on the roadmap.
+
+### 7. Rate limiter: MemoryStore is single-instance only
+
+The default `MemoryRateLimitStore` is process-local — it does not share state across multiple instances of the same service. For multi-instance deployments, pass a `RedisRateLimitStore` (or any `RateLimitStore` implementation) via `createRuntime({ rateLimitStore })`.
+
+### 8. Custom hook mutations must modify the input object in-place
+
+`beforeCreate` and `beforeUpdate` hooks receive an `input` object. To change what gets persisted, mutate the object directly (e.g. `input.status = 'active'`). Replacing the object reference (`input = { ... }`) has no effect because the framework holds a reference to the original object, not the parameter binding.
+
+### 9. afterCreate / afterUpdate / afterDelete are fire-and-forget
+
+Failures in after-hooks are silently discarded. If you need guaranteed delivery (e.g. send email after every registration), pair the hook with a job queue outside the runtime.
+
 ---
 
 ## Spec DSL reference
@@ -210,7 +226,7 @@ npm run test:run    # vitest run (CI)
 npm run build       # tsup → dist/
 ```
 
-215 tests across 21 test files.
+314 tests across 27 test files.
 
 ---
 

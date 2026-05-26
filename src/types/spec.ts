@@ -32,11 +32,36 @@ export interface AuthConfig {
   strategy?: 'jwt' | 'apikey' | 'bearer'
 }
 
-export interface HookConfig { before?: string; after?: string }
+// ── Hooks (Chantier 1) ────────────────────────────────────────────────────────
 
+/**
+ * Lifecycle hook IDs for a resource.
+ * Each value is a handler ID that must exist in createRuntime({ handlers }).
+ * Before-hooks can throw to cancel the operation.
+ * After-hooks are fire-and-forget (failures are ignored).
+ */
 export interface ResourceHooks {
-  list?: HookConfig; create?: HookConfig; read?: HookConfig
-  update?: HookConfig; delete?: HookConfig
+  beforeCreate?: string
+  afterCreate?: string
+  beforeUpdate?: string
+  afterUpdate?: string
+  beforeDelete?: string
+  afterDelete?: string
+}
+
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+
+/** A fully custom endpoint attached to a resource's router. */
+export interface CustomEndpointDef {
+  method: HttpMethod
+  /** Path relative to the resource route, e.g. "/:id/publish" or "/stats". */
+  path: string
+  /** ID of the handler in the createRuntime({ handlers }) map. */
+  handler: string
+  /** Require global auth middleware when true. */
+  auth?: boolean
+  /** Require specific roles (implies auth). */
+  roles?: string[]
 }
 
 /** Role-based access control per action. */
@@ -98,6 +123,7 @@ export interface ResourceDefinition {
   rbac?: ResourceRBAC
   relations?: RelationDefinition[]
   transactions?: TransactionConfig[]
+  customEndpoints?: CustomEndpointDef[]
 }
 
 // ── Global config ─────────────────────────────────────────────────────────────
@@ -137,6 +163,28 @@ export interface SecurityConfig {
   referrerPolicy?: string
 }
 
+// ── Auth flows (Chantier 5) ───────────────────────────────────────────────────
+
+export interface LockoutConfig {
+  /** Number of failed login attempts before locking. Default: 5. */
+  maxAttempts: number
+  /** Lock duration in milliseconds. Default: 15 minutes. */
+  windowMs: number
+}
+
+export interface AuthFlowsConfig {
+  /** Enable email verification flow (POST /auth/verify-email). */
+  emailVerification?: boolean
+  /** Enable password reset flow (POST /auth/forgot-password + /auth/reset-password). */
+  passwordReset?: boolean
+  /** Enable refresh token rotation (POST /auth/refresh). */
+  refreshTokens?: boolean
+  /** Enable token revocation (POST /auth/logout). */
+  revocation?: boolean
+  /** Account lockout after N failed login attempts. */
+  lockout?: LockoutConfig
+}
+
 // ── Root spec ─────────────────────────────────────────────────────────────────
 
 export interface ZeroAPISpec {
@@ -150,4 +198,8 @@ export interface ZeroAPISpec {
   cors?: CorsConfig
   security?: SecurityConfig
   resources: ResourceDefinition[]
+  /** Chantier 5: mount auth registration/login/verification/reset endpoints. */
+  authFlows?: AuthFlowsConfig
+  /** Chantier 4: env var names that must be set at startup (validated by assertEnv). */
+  requiredEnv?: string[]
 }
