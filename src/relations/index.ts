@@ -212,7 +212,7 @@ export function extractNestedRelations(
 
   for (const rel of resource.relations ?? []) {
     if (rel.type !== 'manyToMany') continue
-    const key = rel.resource.toLowerCase() + 's'
+    const key = toPlural(rel.resource)
     if (!Array.isArray(body[key])) continue
 
     nested.push({ rel, items: body[key] as Row[] })
@@ -239,9 +239,16 @@ export function persistNestedRelations(
     const thisFk  = `${resource.name.toLowerCase()}Id`
     const otherFk = `${rel.resource.toLowerCase()}Id`
 
+    const relatedStore = store.get(rel.resource.toLowerCase())
+
     for (const item of items) {
-      const relatedId = (item[otherFk] ?? item['id']) as string
-      if (!relatedId) continue
+      const relatedId = (item[otherFk] ?? item['id']) as string | undefined
+      if (!relatedId) {
+        throw new Error(`Nested relation item for ${rel.resource} is missing "${otherFk}"`)
+      }
+      if (!relatedStore?.has(relatedId)) {
+        throw new Error(`${rel.resource} with id "${relatedId}" not found — nested items must reference existing records`)
+      }
 
       const extraFields = Object.entries(rel.fields ?? {}).reduce<Row>((acc, [name]) => {
         if (item[name] !== undefined) acc[name] = item[name]
@@ -266,6 +273,13 @@ function snakeToPascal(str: string): string {
     .split(/[_-]/)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join('')
+}
+
+function toPlural(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('s')) return lower
+  if (lower.endsWith('y')) return lower.slice(0, -1) + 'ies'
+  return lower + 's'
 }
 
 const FIELD_TYPE_MAP: Record<string, string> = {

@@ -164,29 +164,23 @@ GET /products?sort=price:asc,id:asc&limit=20
 ```
 The `id` field is always unique, so this eliminates the ambiguity entirely.
 
-### 3. Nested creation: depth 1, no join-step rollback
+### 3. Nested creation: depth 1 only
 
 **Supported nested creation (depth 1, manyToMany only):**
 ```jsonc
 POST /articles
 {
   "headline": "Breaking News",
-  "categories": [             // ← manyToMany nested array
+  "categories": [             // ← manyToMany nested array (use plural form of resource name)
     { "categoryId": "xxx", "position": 1 }   // related record must already exist
   ]
 }
 ```
 The items in the nested array are **join records**, not new resources. You pass the ID of an already-existing record. Recursive nesting (creating a new Category inside the Article body) is not supported.
 
-**Rollback scope:** The spec-level `transactions` block and the M2M join-record persistence are independent operations. The execution order on `POST` is:
+**Atomic rollback:** If any nested join record references an ID that does not exist in the store, the entire request is rolled back (including the main record) and a 409 is returned. The spec-level `transactions` block (e.g. stock decrement) runs before nested persistence; if the transaction fails, neither the main record nor join records are written.
 
-1. Run spec transaction (atomic, rollback on failure → 409)
-2. Create main record in store
-3. Write join records (`persistNestedRelations`)
-
-If step 3 silently fails (e.g. a referenced ID is missing), the main record from step 2 is **not** rolled back. In practice `persistNestedRelations` skips invalid items rather than throwing, but the transactional boundary is real: M2M persistence is not covered by the spec-level transaction.
-
-**In production with Prisma:** All three steps would be inside a single `prisma.$transaction()` call, giving full atomicity.
+**In production with Prisma:** All steps would be inside a single `prisma.$transaction()` call.
 
 ### 4. In-memory store only (v0.1.0)
 

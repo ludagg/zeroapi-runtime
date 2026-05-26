@@ -168,3 +168,28 @@ describe('List with filtering and sorting', () => {
     expect(body.nextCursor).toBeTruthy()
   })
 })
+
+describe('Atomic nested creation rollback', () => {
+  it('returns 409 and does not persist the main record when a nested M2M id is not found', async () => {
+    const before = await app.request('/articles')
+    const { count: countBefore } = await before.json() as { count: number }
+
+    const res = await app.request('/articles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        headline: 'Ghost Article',
+        categories: [{ categoryId: '00000000-0000-0000-0000-000000000000', position: 1 }],
+      }),
+    })
+    expect(res.status).toBe(409)
+    const errBody = await res.json() as { error: string; details: string }
+    expect(errBody.error).toBe('Nested relation failed')
+    expect(errBody.details).toContain('not found')
+
+    // Main record must not have been committed to the store
+    const after = await app.request('/articles')
+    const { count: countAfter } = await after.json() as { count: number }
+    expect(countAfter).toBe(countBefore)
+  })
+})

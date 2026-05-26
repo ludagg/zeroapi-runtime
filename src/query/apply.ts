@@ -40,8 +40,13 @@ export function applyFilters(items: Row[], filters: FilterMap): Row[] {
 
 export function applySorts(items: Row[], sorts: SortSpec[]): Row[] {
   if (sorts.length === 0) return items
+  // Always append id:asc as a final tiebreak so the sort order is fully deterministic.
+  // Without it, items with equal sort-key values can appear in different positions across
+  // requests, causing cursor-based pagination to skip or duplicate records at page boundaries.
+  const hasIdSort = sorts.some((s) => s.field === 'id')
+  const effective: SortSpec[] = hasIdSort ? sorts : [...sorts, { field: 'id', direction: 'asc' }]
   return [...items].sort((a, b) => {
-    for (const { field, direction } of sorts) {
+    for (const { field, direction } of effective) {
       const diff = compare(a[field], b[field])
       if (diff !== 0) return direction === 'asc' ? diff : -diff
     }

@@ -187,8 +187,16 @@ function registerResource(
       }
       getStore().set(id, item)
 
-      // Persist nested relations
-      if (nested.length > 0) persistNestedRelations(id, nested, resource, store)
+      // Persist nested M2M join records atomically — rollback the main record on failure
+      if (nested.length > 0) {
+        try {
+          persistNestedRelations(id, nested, resource, store)
+        } catch (err) {
+          getStore().delete(id)
+          const message = err instanceof Error ? err.message : String(err)
+          return c.json({ error: 'Nested relation failed', details: message }, 409)
+        }
+      }
 
       return c.json({ data: item }, 201)
     })

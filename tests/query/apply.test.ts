@@ -126,3 +126,40 @@ describe('applyQuery (combined)', () => {
     expect(count).toBe(2)
   })
 })
+
+describe('Deterministic cursor pagination with duplicate sort values', () => {
+  // All 4 items share the same price — without an id tiebreak, sort order is
+  // non-deterministic and cursors can skip or duplicate records at page boundaries.
+  const tied = [
+    { id: 'w3', price: 50 },
+    { id: 'w1', price: 50 },
+    { id: 'w4', price: 50 },
+    { id: 'w2', price: 50 },
+  ]
+
+  it('covers all items exactly once across two pages when sort keys tie', () => {
+    // Page 1 — no cursor; tiebreak id:asc forces stable order: w1,w2,w3,w4
+    const q1 = parseQueryParams('http://localhost/?sort=price:asc&limit=2')
+    const r1 = applyQuery(tied, q1)
+    expect(r1.data).toHaveLength(2)
+    expect(r1.nextCursor).toBeTruthy()
+
+    // Page 2 — cursor from page 1
+    const q2 = parseQueryParams(`http://localhost/?sort=price:asc&limit=2&cursor=${r1.nextCursor}`)
+    const r2 = applyQuery(tied, q2)
+    expect(r2.data).toHaveLength(2)
+    expect(r2.nextCursor).toBeNull()
+
+    // All 4 items seen, no duplicates
+    const ids = [...r1.data.map(i => i['id']), ...r2.data.map(i => i['id'])]
+    expect(ids).toHaveLength(4)
+    expect(new Set(ids).size).toBe(4)
+  })
+
+  it('stable order is consistent: first page always yields the lexicographically smallest ids', () => {
+    const q = parseQueryParams('http://localhost/?sort=price:asc&limit=2')
+    const { data } = applyQuery(tied, q)
+    expect(data[0]?.['id']).toBe('w1')
+    expect(data[1]?.['id']).toBe('w2')
+  })
+})
