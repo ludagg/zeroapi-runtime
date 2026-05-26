@@ -1,0 +1,18 @@
+# Source — never published, only dist/ ships
+src/
+tests/
+examples/
+
+# Config / tooling
+.github/
+tsconfig.json
+tsconfig.build.json
+vitest.config.*
+tsup.config.*
+*.tsbuildinfo
+
+# Dev artefacts
+node_modules/
+coverage/
+.env
+.env.*
