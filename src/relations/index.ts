@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import type { ZeroAPISpec, ResourceDefinition, RelationDefinition } from '../types/spec.js'
+import { toPlural } from '../utils/plural.js'
 import type { DataStore } from '../generators/routes.js'
 
 type Row = Record<string, unknown>
@@ -273,13 +274,6 @@ function snakeToPascal(str: string): string {
     .split(/[_-]/)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join('')
-}
-
-function toPlural(name: string): string {
-  const lower = name.toLowerCase()
-  if (lower.endsWith('s')) return lower
-  if (lower.endsWith('y')) return lower.slice(0, -1) + 'ies'
-  return lower + 's'
 }
 
 const FIELD_TYPE_MAP: Record<string, string> = {

@@ -9,18 +9,12 @@ import { applyQuery } from '../query/apply.js'
 import { applyIncludes, extractNestedRelations, persistNestedRelations } from '../relations/index.js'
 import { executeTransaction } from '../transactions/executor.js'
 import { processFileFields } from '../upload/index.js'
+import { toPlural } from '../utils/plural.js'
 
 export type ResourceStore = Map<string, Record<string, unknown>>
 export type DataStore = Map<string, ResourceStore>
 
 const DEFAULT_ENDPOINTS: CrudAction[] = ['list', 'create', 'read', 'update', 'delete']
-
-function toPlural(name: string): string {
-  const lower = name.toLowerCase()
-  if (lower.endsWith('s')) return lower
-  if (lower.endsWith('y')) return lower.slice(0, -1) + 'ies'
-  return lower + 's'
-}
 
 function composeGuard(guards: MiddlewareHandler[]): MiddlewareHandler | null {
   if (guards.length === 0) return null

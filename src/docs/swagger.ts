@@ -5,6 +5,7 @@ import type {
   FieldType,
   CrudAction,
 } from '../types/spec.js'
+import { toPlural } from '../utils/plural.js'
 
 // ── JSON Schema types (subset used for OpenAPI 3.0) ───────────────────────────
 
@@ -167,12 +168,7 @@ function errorResponse(description: string): unknown {
 
 const DEFAULT_ENDPOINTS: CrudAction[] = ['list', 'create', 'read', 'update', 'delete']
 
-function toPlural(name: string): string {
-  const lower = name.toLowerCase()
-  if (lower.endsWith('s')) return lower
-  if (lower.endsWith('y')) return lower.slice(0, -1) + 'ies'
-  return lower + 's'
-}
+
 
 function buildPaths(
   resource: ResourceDefinition,

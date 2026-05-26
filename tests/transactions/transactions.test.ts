@@ -161,11 +161,25 @@ describe('Transaction via createRuntime', () => {
   })
 
   it('POST /purchases — returns 409 when stock would go negative', async () => {
+    // Capture state before the failing request
+    const beforePurchases = await txApp.request('/purchases')
+    const { count: purchasesBefore } = await beforePurchases.json() as { count: number }
+
     const res = await txApp.request('/purchases', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ productId, quantity: 100 }),
     })
     expect(res.status).toBe(409)
+
+    // Stock must be unchanged — transaction was rolled back
+    const product = await txApp.request(`/products/${productId}`)
+    const { data: pd } = await product.json() as { data: { stock: number } }
+    expect(pd.stock).toBe(3)
+
+    // Purchase record must not have been created
+    const afterPurchases = await txApp.request('/purchases')
+    const { count: purchasesAfter } = await afterPurchases.json() as { count: number }
+    expect(purchasesAfter).toBe(purchasesBefore)
   })
 })

@@ -104,13 +104,23 @@ describe('Relations in routes', () => {
     expect(res.status).toBe(201)
     const body = await res.json() as { data: { id: string } }
     articleId = body.data.id
+
+    // Verify the join record was actually created, not just the main article
+    const check = await app.request(`/articles/${articleId}?include=Category`)
+    const checkBody = await check.json() as { data: { category: Array<{ label: string }> } }
+    expect(checkBody.data.category).toHaveLength(1)
+    expect(checkBody.data.category[0]?.label).toBe('Fiction')
   })
 
   it('GET /articles?include=category resolves manyToMany', async () => {
     const res = await app.request('/articles?include=Category')
     expect(res.status).toBe(200)
-    const body = await res.json() as { data: Array<{ category: unknown[] }> }
-    expect(Array.isArray(body.data[0]?.category)).toBe(true)
+    const body = await res.json() as { data: Array<{ headline: string; category: Array<{ label: string }> }> }
+    const article = body.data.find((a) => a.headline === 'Breaking News')
+    expect(article).toBeDefined()
+    // Must be a non-empty array, not just any array (Array.isArray([]) would trivially pass)
+    expect(article?.category.length).toBeGreaterThan(0)
+    expect(article?.category[0]?.label).toBe('Fiction')
   })
 
   it('ignores unknown include param gracefully', async () => {
@@ -152,13 +162,20 @@ describe('Relations in routes', () => {
 describe('List with filtering and sorting', () => {
   it('GET /books?title[contains]=pride filters correctly', async () => {
     const res = await app.request('/books?title[contains]=pride')
-    const body = await res.json() as { data: unknown[]; count: number }
+    const body = await res.json() as { data: Array<{ title: string }>; count: number }
     expect(body.count).toBeGreaterThan(0)
+    // Every returned item must actually match the filter — not just a non-zero count
+    expect(body.data.every((b) => b.title.toLowerCase().includes('pride'))).toBe(true)
   })
 
   it('GET /books?sort=title:asc returns sorted list', async () => {
     const res = await app.request('/books?sort=title:asc')
     expect(res.status).toBe(200)
+    const body = await res.json() as { data: Array<{ title: string }> }
+    // Verify actual ascending order, not just a 200 response
+    const titles = body.data.map((b) => b.title)
+    const sorted = [...titles].sort((a, b) => a.localeCompare(b))
+    expect(titles).toEqual(sorted)
   })
 
   it('GET /books?limit=1&cursor returns nextCursor', async () => {
