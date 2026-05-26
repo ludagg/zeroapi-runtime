@@ -4,6 +4,11 @@ import type { Context, MiddlewareHandler } from 'hono'
 import type { ZeroAPISpec, ResourceDefinition, CrudAction } from '../types/spec.js'
 import { generateZodSchemas } from './validation.js'
 import { createPermissionMiddleware } from '../rbac/permissions.js'
+import { parseQueryParams } from '../query/builder.js'
+import { applyQuery } from '../query/apply.js'
+import { applyIncludes, extractNestedRelations, persistNestedRelations } from '../relations/index.js'
+import { executeTransaction } from '../transactions/executor.js'
+import { processFileFields } from '../upload/index.js'
 
 export type ResourceStore = Map<string, Record<string, unknown>>
 export type DataStore = Map<string, ResourceStore>
@@ -17,21 +22,13 @@ function toPlural(name: string): string {
   return lower + 's'
 }
 
-/**
- * Composes multiple middleware handlers into a single MiddlewareHandler.
- * Returns null when the list is empty (no guard needed).
- */
 function composeGuard(guards: MiddlewareHandler[]): MiddlewareHandler | null {
   if (guards.length === 0) return null
   if (guards.length === 1) return guards[0] ?? null
-
   return async (c, next) => {
     let i = 0
     const dispatch = async (): Promise<void> => {
-      if (i >= guards.length) {
-        await next()
-        return
-      }
+      if (i >= guards.length) { await next(); return }
       const mw = guards[i++]
       if (mw) await mw(c, dispatch)
     }
@@ -46,16 +43,9 @@ function buildGuard(
   globalAuth?: MiddlewareHandler
 ): MiddlewareHandler | null {
   const guards: MiddlewareHandler[] = []
-
-  if (resource.auth?.required && globalAuth) {
-    guards.push(globalAuth)
-  }
-
-  const allowedRoles = resource.rbac?.[action]
-  if (allowedRoles && allowedRoles.length > 0) {
-    guards.push(createPermissionMiddleware(allowedRoles, spec))
-  }
-
+  if (resource.auth?.required && globalAuth) guards.push(globalAuth)
+  const allowed = resource.rbac?.[action]
+  if (allowed && allowed.length > 0) guards.push(createPermissionMiddleware(allowed, spec))
   return composeGuard(guards)
 }
 
@@ -68,11 +58,8 @@ function mount(
   guard: MiddlewareHandler | null,
   handler: RouteHandler
 ): void {
-  if (guard) {
-    router[method](path, guard, handler)
-  } else {
-    router[method](path, handler)
-  }
+  if (guard) { router[method](path, guard, handler) }
+  else       { router[method](path, handler)         }
 }
 
 function validationError(
@@ -80,12 +67,42 @@ function validationError(
   issues: Array<{ path: (string | number)[]; message: string }>
 ): Response {
   return c.json(
-    {
-      error: 'Validation failed',
-      details: issues.map((i) => ({ field: i.path.join('.'), message: i.message })),
-    },
+    { error: 'Validation failed', details: issues.map((i) => ({ field: i.path.join('.'), message: i.message })) },
     422
   )
+}
+
+function hasFileFields(resource: ResourceDefinition): boolean {
+  return Object.values(resource.fields).some((f) => f.type === 'file')
+}
+
+async function readBody(
+  c: Context,
+  resource: ResourceDefinition,
+  uploadDir?: string
+): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; res: Response }> {
+  const ct = c.req.header('content-type') ?? ''
+
+  if (ct.includes('multipart/form-data') || (hasFileFields(resource) && !ct.includes('application/json'))) {
+    let formData: Record<string, File | string | File[] | string[]>
+    try {
+      formData = (await c.req.parseBody()) as Record<string, File | string | File[] | string[]>
+    } catch {
+      return { ok: false, res: c.json({ error: 'Failed to parse multipart body' }, 400) }
+    }
+    const { body, errors } = await processFileFields(formData, resource.fields, uploadDir)
+    if (errors.length > 0) {
+      return { ok: false, res: c.json({ error: 'File validation failed', details: errors }, 422) }
+    }
+    return { ok: true, data: body }
+  }
+
+  try {
+    const data = await c.req.json() as Record<string, unknown>
+    return { ok: true, data }
+  } catch {
+    return { ok: false, res: c.json({ error: 'Request body must be valid JSON' }, 400) }
+  }
 }
 
 function registerResource(
@@ -93,75 +110,138 @@ function registerResource(
   resource: ResourceDefinition,
   store: DataStore,
   spec: ZeroAPISpec,
-  authMiddleware?: MiddlewareHandler
+  authMiddleware?: MiddlewareHandler,
+  uploadDir?: string
 ): void {
   const endpoints: CrudAction[] = resource.endpoints ?? DEFAULT_ENDPOINTS
-  const schemas = generateZodSchemas(resource)
-  const key = resource.name.toLowerCase()
+  const schemas   = generateZodSchemas(resource)
+  const key       = resource.name.toLowerCase()
   const routePath = `/${toPlural(resource.name)}`
 
   if (!store.has(key)) store.set(key, new Map())
-
-  const router = new Hono()
   const getStore = (): ResourceStore => store.get(key) as ResourceStore
 
   const readGuard   = buildGuard(resource, 'read',   spec, authMiddleware)
   const writeGuard  = buildGuard(resource, 'write',  spec, authMiddleware)
   const deleteGuard = buildGuard(resource, 'delete', spec, authMiddleware)
 
-  // LIST
+  const router = new Hono()
+
+  // LIST — filtering, sorting, cursor pagination, includes
   if (endpoints.includes('list')) {
     mount(router, 'get', '/', readGuard, (c) => {
-      const items = Array.from(getStore().values())
-      return c.json({ data: items, count: items.length })
+      const query = parseQueryParams(new URL(c.req.url))
+      const allItems = Array.from(getStore().values())
+      const { data, count, nextCursor } = applyQuery(allItems, query)
+      const enriched = applyIncludes(data, query.include, resource, spec, store)
+      return c.json({ data: enriched, count, ...(nextCursor ? { nextCursor } : {}) })
     })
   }
 
-  // CREATE
+  // CREATE — file upload, nested relations, transactions
   if (endpoints.includes('create')) {
     mount(router, 'post', '/', writeGuard, async (c) => {
-      let body: unknown
-      try { body = await c.req.json() }
-      catch { return c.json({ error: 'Request body must be valid JSON' }, 400) }
+      const read = await readBody(c, resource, uploadDir)
+      if (!read.ok) return read.res
 
-      const result = schemas.create.safeParse(body)
-      if (!result.success) return validationError(c, result.error.issues)
+      // Extract nested manyToMany data before validation
+      const { body: cleanBody, nested } = extractNestedRelations(read.data, resource)
 
-      const id = randomUUID()
+      // Validate primary fields only
+      const fileFieldKeys = Object.entries(resource.fields)
+        .filter(([, f]) => f.type === 'file')
+        .map(([k]) => k)
+
+      const schemaResult = schemas.create.safeParse(
+        Object.fromEntries(
+          Object.entries(cleanBody).filter(([k]) => !fileFieldKeys.includes(k))
+        )
+      )
+      if (!schemaResult.success) return validationError(c, schemaResult.error.issues)
+
+      // Transaction check
+      const txConfig = resource.transactions?.find((t) => t.trigger === 'POST')
+      if (txConfig) {
+        const txResult = await executeTransaction(txConfig.operations, cleanBody, store)
+        if (!txResult.success) {
+          return c.json(
+            { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
+            409
+          )
+        }
+      }
+
+      // FK fields from manyToOne/oneToOne relations are not in Zod schema — re-attach them
+      const fkFields = (resource.relations ?? [])
+        .filter((r) => r.type === 'manyToOne' || r.type === 'oneToOne')
+        .map((r) => r.field ?? `${r.resource.toLowerCase()}Id`)
+
+      const id  = randomUUID()
       const now = new Date().toISOString()
-      const item: Record<string, unknown> = { id, createdAt: now, updatedAt: now, ...result.data }
+      const item: Record<string, unknown> = {
+        id, createdAt: now, updatedAt: now,
+        ...schemaResult.data,
+        ...Object.fromEntries(fkFields.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
+        // Re-attach file URLs (already uploaded, not part of Zod schema)
+        ...Object.fromEntries(fileFieldKeys.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
+      }
       getStore().set(id, item)
+
+      // Persist nested relations
+      if (nested.length > 0) persistNestedRelations(id, nested, resource, store)
+
       return c.json({ data: item }, 201)
     })
   }
 
-  // READ
+  // READ — with optional ?include=
   if (endpoints.includes('read')) {
     mount(router, 'get', '/:id', readGuard, (c) => {
       const id = c.req.param('id') ?? ''
       const item = getStore().get(id)
       if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
-      return c.json({ data: item })
+
+      const query = parseQueryParams(new URL(c.req.url))
+      const enriched = query.include.length > 0
+        ? applyIncludes([item], query.include, resource, spec, store)[0] ?? item
+        : item
+
+      return c.json({ data: enriched })
     })
   }
 
-  // UPDATE
+  // UPDATE — file upload, transactions
   if (endpoints.includes('update')) {
     mount(router, 'put', '/:id', writeGuard, async (c) => {
       const id = c.req.param('id') ?? ''
       const existing = getStore().get(id)
       if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
-      let body: unknown
-      try { body = await c.req.json() }
-      catch { return c.json({ error: 'Request body must be valid JSON' }, 400) }
+      const read = await readBody(c, resource, uploadDir)
+      if (!read.ok) return read.res
 
-      const result = schemas.update.safeParse(body)
+      const result = schemas.update.safeParse(read.data)
       if (!result.success) return validationError(c, result.error.issues)
+
+      const txConfig = resource.transactions?.find((t) => t.trigger === 'PUT')
+      if (txConfig) {
+        const txResult = await executeTransaction(txConfig.operations, read.data, store)
+        if (!txResult.success) {
+          return c.json(
+            { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
+            409
+          )
+        }
+      }
+
+      const fkFieldsUpd = (resource.relations ?? [])
+        .filter((r) => r.type === 'manyToOne' || r.type === 'oneToOne')
+        .map((r) => r.field ?? `${r.resource.toLowerCase()}Id`)
 
       const updated: Record<string, unknown> = {
         ...existing,
         ...(result.data as Record<string, unknown>),
+        ...Object.fromEntries(fkFieldsUpd.map((k) => [k, read.data[k]]).filter(([, v]) => v != null)),
         updatedAt: new Date().toISOString(),
       }
       getStore().set(id, updated)
@@ -169,11 +249,23 @@ function registerResource(
     })
   }
 
-  // DELETE
+  // DELETE — transactions
   if (endpoints.includes('delete')) {
-    mount(router, 'delete', '/:id', deleteGuard, (c) => {
+    mount(router, 'delete', '/:id', deleteGuard, async (c) => {
       const id = c.req.param('id') ?? ''
       if (!getStore().has(id)) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+
+      const txConfig = resource.transactions?.find((t) => t.trigger === 'DELETE')
+      if (txConfig) {
+        const txResult = await executeTransaction(txConfig.operations, { id }, store)
+        if (!txResult.success) {
+          return c.json(
+            { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
+            409
+          )
+        }
+      }
+
       getStore().delete(id)
       return c.json({ data: null })
     })
@@ -184,15 +276,16 @@ function registerResource(
 
 /**
  * Registers all resource routes on the Hono app.
- * Applies auth middleware and RBAC permission checks per action when configured in the spec.
+ * Integrates: auth guards, RBAC, query builder, includes, transactions, file uploads.
  */
 export function generateRoutes(
   spec: ZeroAPISpec,
   app: Hono,
   store: DataStore,
-  authMiddleware?: MiddlewareHandler
+  authMiddleware?: MiddlewareHandler,
+  uploadDir?: string
 ): void {
   for (const resource of spec.resources) {
-    registerResource(app, resource, store, spec, authMiddleware)
+    registerResource(app, resource, store, spec, authMiddleware, uploadDir)
   }
 }

@@ -1,11 +1,11 @@
 import { z } from 'zod'
-import type { ZeroAPISpec } from '../types/spec.js'
+import type { ZeroAPISpec, ResourceDefinition } from '../types/spec.js'
 
-// ── Field ────────────────────────────────────────────────────────────────────
+// ── Field ─────────────────────────────────────────────────────────────────────
 
 const FieldTypeSchema = z.enum([
   'string', 'text', 'number', 'integer', 'boolean',
-  'date', 'datetime', 'email', 'url', 'uuid',
+  'date', 'datetime', 'email', 'url', 'uuid', 'file',
 ])
 
 const FieldDefinitionSchema = z.object({
@@ -18,9 +18,14 @@ const FieldDefinitionSchema = z.object({
   minLength: z.number().optional(),
   maxLength: z.number().optional(),
   description: z.string().optional(),
+  // file-specific
+  accept: z.array(z.string()).optional(),
+  maxSize: z.string().optional(),
+  storage: z.enum(['r2', 's3', 'local']).optional(),
+  multiple: z.boolean().optional(),
 })
 
-// ── Resource ─────────────────────────────────────────────────────────────────
+// ── Resource ──────────────────────────────────────────────────────────────────
 
 const CrudActionSchema = z.enum(['list', 'create', 'read', 'update', 'delete'])
 
@@ -49,6 +54,32 @@ const ResourceRBACSchema = z.object({
   delete: z.array(z.string()).optional(),
 })
 
+// Relations
+const RelationDefinitionSchema = z.object({
+  type: z.enum(['oneToOne', 'oneToMany', 'manyToOne', 'manyToMany']),
+  resource: z.string().min(1),
+  field: z.string().optional(),
+  required: z.boolean().optional(),
+  through: z.string().optional(),
+  fields: z.record(z.string(), FieldDefinitionSchema).optional(),
+  onDelete: z.enum(['Cascade', 'SetNull', 'Restrict', 'NoAction']).optional(),
+})
+
+// Transactions
+const TxOperationSchema = z.object({
+  action: z.enum(['create', 'update', 'delete', 'decrement', 'increment']),
+  resource: z.string().min(1),
+  idFrom: z.string().optional(),
+  field: z.string().optional(),
+  amount: z.number().optional(),
+  amountFrom: z.string().optional(),
+})
+
+const TransactionConfigSchema = z.object({
+  trigger: z.enum(['POST', 'PUT', 'DELETE', 'PATCH']),
+  operations: z.array(TxOperationSchema).min(1),
+})
+
 const ResourceDefinitionSchema = z.object({
   name: z.string().min(1, 'Resource name cannot be empty'),
   description: z.string().optional(),
@@ -60,6 +91,8 @@ const ResourceDefinitionSchema = z.object({
   auth: AuthConfigSchema.optional(),
   hooks: ResourceHooksSchema.optional(),
   rbac: ResourceRBACSchema.optional(),
+  relations: z.array(RelationDefinitionSchema).optional(),
+  transactions: z.array(TransactionConfigSchema).optional(),
 })
 
 // ── Global config ─────────────────────────────────────────────────────────────
@@ -99,8 +132,6 @@ const SecurityConfigSchema = z.object({
   referrerPolicy: z.string().optional(),
 })
 
-// ── Root spec ─────────────────────────────────────────────────────────────────
-
 const ZeroAPISpecSchema = z.object({
   version: z.string().min(1, 'Version is required'),
   name: z.string().min(1, 'Spec name is required'),
@@ -113,6 +144,46 @@ const ZeroAPISpecSchema = z.object({
   security: SecurityConfigSchema.optional(),
   resources: z.array(ResourceDefinitionSchema).min(1, 'Spec must define at least one resource'),
 })
+
+// ── Relation semantic validation ──────────────────────────────────────────────
+
+function validateRelations(resources: ResourceDefinition[]): string | null {
+  const names = new Set(resources.map((r) => r.name))
+  const throughNames = new Set<string>()
+
+  for (const resource of resources) {
+    for (const rel of resource.relations ?? []) {
+      if (!names.has(rel.resource)) {
+        return `Resource "${resource.name}" has relation to unknown resource "${rel.resource}"`
+      }
+      if (rel.type === 'manyToMany' && !rel.through) {
+        return `manyToMany relation in "${resource.name}" → "${rel.resource}" requires a "through" field`
+      }
+      if (rel.through) {
+        if (throughNames.has(rel.through)) {
+          return `Duplicate join-table name "${rel.through}" — each manyToMany must use a unique through name`
+        }
+        throughNames.add(rel.through)
+      }
+    }
+  }
+
+  // Detect mutual required manyToOne (insertion deadlock)
+  for (const resource of resources) {
+    for (const rel of resource.relations ?? []) {
+      if (rel.type !== 'manyToOne' || !rel.required) continue
+      const target = resources.find((r) => r.name === rel.resource)
+      const reverse = target?.relations?.find(
+        (r) => r.resource === resource.name && r.type === 'manyToOne' && r.required
+      )
+      if (reverse) {
+        return `Circular required manyToOne: "${resource.name}" ↔ "${rel.resource}" creates an insertion deadlock`
+      }
+    }
+  }
+
+  return null
+}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -128,7 +199,8 @@ export class ParseError extends Error {
 
 /**
  * Parses and validates a raw object against the ZeroAPI DSL schema.
- * Throws a ParseError with field-level details when the spec is invalid.
+ * Performs structural validation (Zod) followed by semantic checks (relation integrity).
+ * Throws ParseError with field-level details on failure.
  */
 export function parseSpec(raw: unknown): ZeroAPISpec {
   const result = ZeroAPISpecSchema.safeParse(raw)
@@ -138,5 +210,15 @@ export function parseSpec(raw: unknown): ZeroAPISpec {
       .join(' | ')
     throw new ParseError(`Invalid ZeroAPI spec — ${summary}`, result.error)
   }
-  return result.data as ZeroAPISpec
+
+  const spec = result.data as ZeroAPISpec
+  const relError = validateRelations(spec.resources)
+  if (relError) {
+    const relZodError = new z.ZodError([
+      { code: z.ZodIssueCode.custom, message: relError, path: ['resources'] },
+    ])
+    throw new ParseError(`Invalid ZeroAPI spec — ${relError}`, relZodError)
+  }
+
+  return spec
 }

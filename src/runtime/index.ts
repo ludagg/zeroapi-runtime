@@ -17,103 +17,71 @@ import { generateOpenAPISpec } from '../docs/swagger.js'
 import { mountScalarDocs } from '../docs/scalar.js'
 
 export interface RuntimeOptions {
-  /** Enable HTTP request logging. Defaults to true. */
   enableLogging?: boolean
-  /** Enable CORS. Defaults to true (permissive unless spec.cors is set). */
   enableCors?: boolean
-  /** Enable security headers (Helmet). Defaults to true. */
   enableHelmet?: boolean
-  /** Enable XSS / injection sanitisation middleware. Defaults to true. */
   enableSanitize?: boolean
-  /** Mount OpenAPI JSON + Scalar docs UI. Defaults to true. */
   enableDocs?: boolean
+  /** Directory for local file uploads. Defaults to "./uploads". */
+  uploadDir?: string
 }
 
 export interface RuntimeResult {
-  /** Hono application with all routes, security, and docs registered. */
   app: Hono
-  /** Generated Prisma schema string — write to prisma/schema.prisma. */
   prismaSchema: string
-  /** Generated Zod schemas indexed by resource name. */
   zodSchemas: Record<string, ResourceSchemas>
-  /** Generated Vitest test suite as a string. */
   testSuite: string
-  /** Generated OpenAPI 3.0.3 spec object — served at /openapi.json. */
   openApiSpec: OpenAPISpec
-  /** The spec used to build this runtime. */
   spec: ZeroAPISpec
 }
 
 /**
  * Core runtime factory.
  *
- * Consumes a validated ZeroAPISpec and wires up:
- *  - Security headers (Helmet)
- *  - Configurable CORS
- *  - Rate limiting (when spec.rateLimit is set)
- *  - XSS / injection sanitisation
- *  - JWT / API-key authentication (when spec.auth is set)
+ * Wires together:
+ *  - Security headers · CORS · rate limiting · sanitisation
+ *  - JWT / API-key authentication
  *  - RBAC permission checks per resource action
- *  - REST routes (list / create / read / update / delete)
- *  - OpenAPI 3.0 JSON endpoint + Scalar docs UI
- *
- * The built-in store is in-memory (suitable for dev/testing).
+ *  - REST routes with filtering, sorting, cursor pagination, ?include=
+ *  - Relation support (manyToOne/oneToMany/manyToMany with nested creation)
+ *  - Atomic transactions with rollback
+ *  - File upload (local / S3 / R2) with MIME + size validation
+ *  - OpenAPI 3.0 JSON + Scalar docs UI
  */
 export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): RuntimeResult {
   const {
-    enableLogging = true,
-    enableCors = true,
-    enableHelmet = true,
+    enableLogging  = true,
+    enableCors     = true,
+    enableHelmet   = true,
     enableSanitize = true,
-    enableDocs = true,
+    enableDocs     = true,
+    uploadDir      = './uploads',
   } = options
 
-  const app = new Hono()
+  const app   = new Hono()
   const store: DataStore = new Map()
 
-  // ── Middleware stack (order matters) ────────────────────────────────────────
-  if (enableHelmet) {
-    app.use('*', createHelmetMiddleware(spec.security))
-  }
+  if (enableHelmet)   app.use('*', createHelmetMiddleware(spec.security))
+  if (enableCors)     app.use('*', createCorsMiddleware(spec.cors))
+  if (spec.rateLimit) app.use('*', createRateLimitMiddleware(spec.rateLimit))
+  if (enableSanitize) app.use('*', createSanitizeMiddleware())
+  if (enableLogging)  app.use('*', logger())
 
-  if (enableCors) {
-    app.use('*', createCorsMiddleware(spec.cors))
-  }
-
-  if (spec.rateLimit) {
-    app.use('*', createRateLimitMiddleware(spec.rateLimit))
-  }
-
-  if (enableSanitize) {
-    app.use('*', createSanitizeMiddleware())
-  }
-
-  if (enableLogging) {
-    app.use('*', logger())
-  }
-
-  // ── Built-in endpoints ──────────────────────────────────────────────────────
   app.get('/health', (c) =>
     c.json({ status: 'ok', name: spec.name, version: spec.version })
   )
 
-  // ── Auth middleware (passed into route generator) ───────────────────────────
   const authMiddleware = spec.auth ? createAuthMiddleware(spec.auth) : undefined
 
-  // ── Resource routes + RBAC ──────────────────────────────────────────────────
-  generateRoutes(spec, app, store, authMiddleware)
+  generateRoutes(spec, app, store, authMiddleware, uploadDir)
 
-  // ── Generated artifacts ─────────────────────────────────────────────────────
   const zodSchemas: Record<string, ResourceSchemas> = {}
   for (const resource of spec.resources) {
     zodSchemas[resource.name] = generateZodSchemas(resource)
   }
 
   const openApiSpec = generateOpenAPISpec(spec)
-
-  if (enableDocs) {
-    mountScalarDocs(app, openApiSpec)
-  }
+  if (enableDocs) mountScalarDocs(app, openApiSpec)
 
   return {
     app,

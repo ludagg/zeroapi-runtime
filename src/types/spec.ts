@@ -1,21 +1,10 @@
-/**
- * Supported primitive field types in the ZeroAPI DSL.
- */
+/** Supported primitive field types in the ZeroAPI DSL. */
 export type FieldType =
-  | 'string'
-  | 'text'
-  | 'number'
-  | 'integer'
-  | 'boolean'
-  | 'date'
-  | 'datetime'
-  | 'email'
-  | 'url'
-  | 'uuid'
+  | 'string' | 'text' | 'number' | 'integer' | 'boolean'
+  | 'date' | 'datetime' | 'email' | 'url' | 'uuid'
+  | 'file'
 
-/**
- * Definition of a single resource field.
- */
+/** Definition of a single resource field, including optional file-specific constraints. */
 export interface FieldDefinition {
   type: FieldType
   required?: boolean
@@ -26,95 +15,112 @@ export interface FieldDefinition {
   minLength?: number
   maxLength?: number
   description?: string
+  // ── file-specific (only valid when type === 'file') ──────────────────────
+  accept?: string[]
+  maxSize?: string       // e.g. "5MB"
+  storage?: 'r2' | 's3' | 'local'
+  multiple?: boolean
 }
 
-/** Standard CRUD actions that can be enabled per resource. */
+/** Standard CRUD actions. */
 export type CrudAction = 'list' | 'create' | 'read' | 'update' | 'delete'
 
-/** Per-resource authentication requirement. */
+/** Per-resource auth requirement. */
 export interface AuthConfig {
   required: boolean
   roles?: string[]
   strategy?: 'jwt' | 'apikey' | 'bearer'
 }
 
-/** Before/after hook function names for a lifecycle event. */
-export interface HookConfig {
-  before?: string
-  after?: string
-}
+export interface HookConfig { before?: string; after?: string }
 
-/** Lifecycle hooks per CRUD operation on a resource. */
 export interface ResourceHooks {
-  list?: HookConfig
-  create?: HookConfig
-  read?: HookConfig
-  update?: HookConfig
-  delete?: HookConfig
+  list?: HookConfig; create?: HookConfig; read?: HookConfig
+  update?: HookConfig; delete?: HookConfig
 }
 
-/**
- * Role-based access control per resource action.
- * Each array holds the role names allowed for that action.
- * An empty or absent config means all authenticated users are allowed.
- */
+/** Role-based access control per action. */
 export interface ResourceRBAC {
-  /** Roles allowed to list and get by id. */
   read?: string[]
-  /** Roles allowed to create and update. */
   write?: string[]
-  /** Roles allowed to delete. */
   delete?: string[]
 }
 
-/**
- * A single API resource — maps to a Prisma model, Hono routes, and Zod schemas.
- */
+// ── Relations ─────────────────────────────────────────────────────────────────
+
+export type RelationType = 'oneToOne' | 'oneToMany' | 'manyToOne' | 'manyToMany'
+
+export interface RelationDefinition {
+  type: RelationType
+  /** Name of the related resource (must exist in spec.resources). */
+  resource: string
+  /** FK field name on this resource (required for manyToOne / oneToOne owned side). */
+  field?: string
+  required?: boolean
+  /** Join table name — required for manyToMany. */
+  through?: string
+  /** Extra fields stored on the join table. */
+  fields?: Record<string, FieldDefinition>
+  onDelete?: 'Cascade' | 'SetNull' | 'Restrict' | 'NoAction'
+}
+
+// ── Transactions ──────────────────────────────────────────────────────────────
+
+export type TxAction = 'create' | 'update' | 'delete' | 'decrement' | 'increment'
+
+export interface TxOperation {
+  action: TxAction
+  resource: string
+  /** Key in the request body to read the related resource ID from. */
+  idFrom?: string
+  /** Field to increment / decrement. */
+  field?: string
+  /** Static amount (integer). */
+  amount?: number
+  /** Key in the request body to read the amount from. */
+  amountFrom?: string
+}
+
+export interface TransactionConfig {
+  trigger: 'POST' | 'PUT' | 'DELETE' | 'PATCH'
+  operations: TxOperation[]
+}
+
+// ── Resource ──────────────────────────────────────────────────────────────────
+
 export interface ResourceDefinition {
   name: string
   description?: string
   fields: Record<string, FieldDefinition>
-  /** Defaults to all five CRUD actions when omitted. */
   endpoints?: CrudAction[]
   auth?: AuthConfig
   hooks?: ResourceHooks
-  /** Optional RBAC — restricts actions to specific roles. */
   rbac?: ResourceRBAC
+  relations?: RelationDefinition[]
+  transactions?: TransactionConfig[]
 }
 
-/** Global authentication configuration applied across the whole API. */
+// ── Global config ─────────────────────────────────────────────────────────────
+
 export interface GlobalAuthConfig {
   strategy: 'jwt' | 'apikey' | 'bearer'
-  /** Used for JWT signature verification. */
   secret?: string
-  /** Custom header name. Defaults to "Authorization". */
   header?: string
 }
 
-/**
- * A named role with optional inheritance.
- * Permissions are defined on each resource via `ResourceDefinition.rbac`.
- */
 export interface RoleDefinition {
   name: string
   description?: string
-  /** Roles whose permissions this role inherits. */
   inherits?: string[]
 }
 
-/** Rate-limiting configuration applied globally. */
 export interface RateLimitConfig {
-  /** Duration of the sliding window in milliseconds. */
   windowMs: number
-  /** Maximum number of requests per IP per window. */
   max: number
-  /** Also apply a per-user limit (extracted from JWT `sub`). */
   byUser?: boolean
-  /** Custom rejection message. */
   message?: string
 }
 
-/** Configurable CORS policy. When absent, permissive defaults apply. */
 export interface CorsConfig {
   origins: string[]
   methods?: string[]
@@ -122,7 +128,6 @@ export interface CorsConfig {
   credentials?: boolean
 }
 
-/** Security-header (Helmet-style) configuration. All defaults are on. */
 export interface SecurityConfig {
   contentSecurityPolicy?: boolean
   hsts?: boolean
@@ -132,23 +137,17 @@ export interface SecurityConfig {
   referrerPolicy?: string
 }
 
-/**
- * Root ZeroAPI Spec — the contract between the AI generator and the runtime.
- */
+// ── Root spec ─────────────────────────────────────────────────────────────────
+
 export interface ZeroAPISpec {
   version: string
   name: string
   description?: string
   baseUrl?: string
-  /** Global authentication applied to resources that set `auth.required = true`. */
   auth?: GlobalAuthConfig
-  /** Named roles available across all resources. */
   roles?: RoleDefinition[]
-  /** Global rate limiting (applied before route handlers). */
   rateLimit?: RateLimitConfig
-  /** Configurable CORS policy (overrides the default permissive CORS). */
   cors?: CorsConfig
-  /** Security headers configuration. */
   security?: SecurityConfig
   resources: ResourceDefinition[]
 }

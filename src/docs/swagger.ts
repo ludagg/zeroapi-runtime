@@ -62,6 +62,7 @@ const TYPE_MAP: Record<FieldType, JSONSchema> = {
   email:    { type: 'string', format: 'email' },
   url:      { type: 'string', format: 'uri' },
   uuid:     { type: 'string', format: 'uuid' },
+  file:     { type: 'string', format: 'uri', description: 'URL of the uploaded file' },
 }
 
 function fieldToJsonSchema(field: FieldDefinition): JSONSchema {

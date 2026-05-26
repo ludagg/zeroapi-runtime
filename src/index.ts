@@ -29,25 +29,37 @@ export { generateRenderConfig, getRenderDeployButton } from './deploy/external/r
 export { generateVercelConfig, getVercelDeployButton } from './deploy/external/vercel.js'
 export { generateFlyConfig, getFlyDeployButton } from './deploy/external/flyio.js'
 
+// ── Query ─────────────────────────────────────────────────────────────────────
+export { parseQueryParams, toPrismaQuery } from './query/builder.js'
+export { applyFilters, applySorts, applyPagination, applyQuery } from './query/apply.js'
+
+// ── Relations ─────────────────────────────────────────────────────────────────
+export { applyIncludes, renderRelationFields, renderJoinModels } from './relations/index.js'
+
+// ── Transactions ──────────────────────────────────────────────────────────────
+export { executeTransaction } from './transactions/executor.js'
+
+// ── Upload ────────────────────────────────────────────────────────────────────
+export { uploadFile, validateFile, parseMaxSize, processFileFields } from './upload/index.js'
+export { uploadLocal } from './upload/providers/local.js'
+export { generatePresignedPutUrl } from './upload/providers/s3.js'
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 export type {
-  ZeroAPISpec,
-  ResourceDefinition,
-  FieldDefinition,
-  FieldType,
-  CrudAction,
-  AuthConfig,
-  GlobalAuthConfig,
-  ResourceHooks,
-  HookConfig,
-  RoleDefinition,
-  ResourceRBAC,
-  RateLimitConfig,
-  CorsConfig,
-  SecurityConfig,
+  ZeroAPISpec, ResourceDefinition, FieldDefinition, FieldType, CrudAction,
+  AuthConfig, GlobalAuthConfig, ResourceHooks, HookConfig,
+  RoleDefinition, ResourceRBAC, RateLimitConfig, CorsConfig, SecurityConfig,
+  RelationDefinition, RelationType,
+  TxOperation, TxAction, TransactionConfig,
 } from './types/spec.js'
 
 export type { RuntimeResult, RuntimeOptions } from './runtime/index.js'
 export type { ResourceSchemas } from './generators/validation.js'
 export type { DataStore, ResourceStore } from './generators/routes.js'
 export type { OpenAPISpec } from './docs/swagger.js'
+export type { ParsedQuery, FilterMap, SortSpec, PaginationSpec } from './query/builder.js'
+export type { QueryResult } from './query/apply.js'
+export type { TxResult } from './transactions/executor.js'
+export type { UploadResult, UploadError } from './upload/index.js'
+export type { S3Config, PresignedUrlResult } from './upload/providers/s3.js'
+export type { LocalUploadResult } from './upload/providers/local.js'
