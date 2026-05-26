@@ -1,8 +1,9 @@
 import { Hono } from 'hono'
 import { randomUUID } from 'crypto'
-import type { MiddlewareHandler } from 'hono'
+import type { Context, MiddlewareHandler } from 'hono'
 import type { ZeroAPISpec, ResourceDefinition, CrudAction } from '../types/spec.js'
 import { generateZodSchemas } from './validation.js'
+import { createPermissionMiddleware } from '../rbac/permissions.js'
 
 export type ResourceStore = Map<string, Record<string, unknown>>
 export type DataStore = Map<string, ResourceStore>
@@ -16,123 +17,164 @@ function toPlural(name: string): string {
   return lower + 's'
 }
 
+/**
+ * Composes multiple middleware handlers into a single MiddlewareHandler.
+ * Returns null when the list is empty (no guard needed).
+ */
+function composeGuard(guards: MiddlewareHandler[]): MiddlewareHandler | null {
+  if (guards.length === 0) return null
+  if (guards.length === 1) return guards[0] ?? null
+
+  return async (c, next) => {
+    let i = 0
+    const dispatch = async (): Promise<void> => {
+      if (i >= guards.length) {
+        await next()
+        return
+      }
+      const mw = guards[i++]
+      if (mw) await mw(c, dispatch)
+    }
+    await dispatch()
+  }
+}
+
+function buildGuard(
+  resource: ResourceDefinition,
+  action: 'read' | 'write' | 'delete',
+  spec: ZeroAPISpec,
+  globalAuth?: MiddlewareHandler
+): MiddlewareHandler | null {
+  const guards: MiddlewareHandler[] = []
+
+  if (resource.auth?.required && globalAuth) {
+    guards.push(globalAuth)
+  }
+
+  const allowedRoles = resource.rbac?.[action]
+  if (allowedRoles && allowedRoles.length > 0) {
+    guards.push(createPermissionMiddleware(allowedRoles, spec))
+  }
+
+  return composeGuard(guards)
+}
+
+type RouteHandler = (c: Context) => Response | Promise<Response>
+
+function mount(
+  router: Hono,
+  method: 'get' | 'post' | 'put' | 'delete',
+  path: string,
+  guard: MiddlewareHandler | null,
+  handler: RouteHandler
+): void {
+  if (guard) {
+    router[method](path, guard, handler)
+  } else {
+    router[method](path, handler)
+  }
+}
+
+function validationError(
+  c: Context,
+  issues: Array<{ path: (string | number)[]; message: string }>
+): Response {
+  return c.json(
+    {
+      error: 'Validation failed',
+      details: issues.map((i) => ({ field: i.path.join('.'), message: i.message })),
+    },
+    422
+  )
+}
+
 function registerResource(
   app: Hono,
   resource: ResourceDefinition,
   store: DataStore,
+  spec: ZeroAPISpec,
   authMiddleware?: MiddlewareHandler
 ): void {
   const endpoints: CrudAction[] = resource.endpoints ?? DEFAULT_ENDPOINTS
   const schemas = generateZodSchemas(resource)
-  const resourceKey = resource.name.toLowerCase()
+  const key = resource.name.toLowerCase()
   const routePath = `/${toPlural(resource.name)}`
 
-  if (!store.has(resourceKey)) {
-    store.set(resourceKey, new Map())
-  }
+  if (!store.has(key)) store.set(key, new Map())
 
   const router = new Hono()
+  const getStore = (): ResourceStore => store.get(key) as ResourceStore
 
-  if (resource.auth?.required && authMiddleware) {
-    router.use('*', authMiddleware)
-  }
+  const readGuard   = buildGuard(resource, 'read',   spec, authMiddleware)
+  const writeGuard  = buildGuard(resource, 'write',  spec, authMiddleware)
+  const deleteGuard = buildGuard(resource, 'delete', spec, authMiddleware)
 
+  // LIST
   if (endpoints.includes('list')) {
-    router.get('/', (c) => {
-      const items = Array.from((store.get(resourceKey) as ResourceStore).values())
+    mount(router, 'get', '/', readGuard, (c) => {
+      const items = Array.from(getStore().values())
       return c.json({ data: items, count: items.length })
     })
   }
 
+  // CREATE
   if (endpoints.includes('create')) {
-    router.post('/', async (c) => {
+    mount(router, 'post', '/', writeGuard, async (c) => {
       let body: unknown
-      try {
-        body = await c.req.json()
-      } catch {
-        return c.json({ error: 'Request body must be valid JSON' }, 400)
-      }
+      try { body = await c.req.json() }
+      catch { return c.json({ error: 'Request body must be valid JSON' }, 400) }
 
-      const parsed = schemas.create.safeParse(body)
-      if (!parsed.success) {
-        return c.json(
-          {
-            error: 'Validation failed',
-            details: parsed.error.issues.map((i) => ({
-              field: i.path.join('.'),
-              message: i.message,
-            })),
-          },
-          422
-        )
-      }
+      const result = schemas.create.safeParse(body)
+      if (!result.success) return validationError(c, result.error.issues)
 
       const id = randomUUID()
       const now = new Date().toISOString()
-      const item: Record<string, unknown> = { id, createdAt: now, updatedAt: now, ...parsed.data }
-      ;(store.get(resourceKey) as ResourceStore).set(id, item)
+      const item: Record<string, unknown> = { id, createdAt: now, updatedAt: now, ...result.data }
+      getStore().set(id, item)
       return c.json({ data: item }, 201)
     })
   }
 
+  // READ
   if (endpoints.includes('read')) {
-    router.get('/:id', (c) => {
-      const id = c.req.param('id')
-      const item = (store.get(resourceKey) as ResourceStore).get(id)
-      if (!item) {
-        return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
-      }
+    mount(router, 'get', '/:id', readGuard, (c) => {
+      const id = c.req.param('id') ?? ''
+      const item = getStore().get(id)
+      if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
       return c.json({ data: item })
     })
   }
 
+  // UPDATE
   if (endpoints.includes('update')) {
-    router.put('/:id', async (c) => {
-      const id = c.req.param('id')
-      const existing = (store.get(resourceKey) as ResourceStore).get(id)
-      if (!existing) {
-        return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
-      }
+    mount(router, 'put', '/:id', writeGuard, async (c) => {
+      const id = c.req.param('id') ?? ''
+      const existing = getStore().get(id)
+      if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
       let body: unknown
-      try {
-        body = await c.req.json()
-      } catch {
-        return c.json({ error: 'Request body must be valid JSON' }, 400)
-      }
+      try { body = await c.req.json() }
+      catch { return c.json({ error: 'Request body must be valid JSON' }, 400) }
 
-      const parsed = schemas.update.safeParse(body)
-      if (!parsed.success) {
-        return c.json(
-          {
-            error: 'Validation failed',
-            details: parsed.error.issues.map((i) => ({
-              field: i.path.join('.'),
-              message: i.message,
-            })),
-          },
-          422
-        )
-      }
+      const result = schemas.update.safeParse(body)
+      if (!result.success) return validationError(c, result.error.issues)
 
       const updated: Record<string, unknown> = {
         ...existing,
-        ...(parsed.data as Record<string, unknown>),
+        ...(result.data as Record<string, unknown>),
         updatedAt: new Date().toISOString(),
       }
-      ;(store.get(resourceKey) as ResourceStore).set(id, updated)
+      getStore().set(id, updated)
       return c.json({ data: updated })
     })
   }
 
+  // DELETE
   if (endpoints.includes('delete')) {
-    router.delete('/:id', (c) => {
-      const id = c.req.param('id')
-      const exists = (store.get(resourceKey) as ResourceStore).has(id)
-      if (!exists) {
-        return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
-      }
-      ;(store.get(resourceKey) as ResourceStore).delete(id)
+    mount(router, 'delete', '/:id', deleteGuard, (c) => {
+      const id = c.req.param('id') ?? ''
+      if (!getStore().has(id)) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+      getStore().delete(id)
       return c.json({ data: null })
     })
   }
@@ -141,8 +183,8 @@ function registerResource(
 }
 
 /**
- * Registers all resource routes on the provided Hono app instance.
- * Routes follow REST conventions: GET /resources, POST /resources, GET /resources/:id, etc.
+ * Registers all resource routes on the Hono app.
+ * Applies auth middleware and RBAC permission checks per action when configured in the spec.
  */
 export function generateRoutes(
   spec: ZeroAPISpec,
@@ -151,6 +193,6 @@ export function generateRoutes(
   authMiddleware?: MiddlewareHandler
 ): void {
   for (const resource of spec.resources) {
-    registerResource(app, resource, store, authMiddleware)
+    registerResource(app, resource, store, spec, authMiddleware)
   }
 }
