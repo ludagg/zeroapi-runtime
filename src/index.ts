@@ -1,0 +1,88 @@
+// ── Core ──────────────────────────────────────────────────────────────────────
+export { createRuntime } from './runtime/index.js'
+export { parseSpec, ParseError } from './parser/index.js'
+
+// ── Generators ────────────────────────────────────────────────────────────────
+export { generatePrismaSchema } from './generators/schema.js'
+export { generateZodSchemas } from './generators/validation.js'
+export { generateTests } from './generators/tests.js'
+export { generateRoutes } from './generators/routes.js'
+
+// ── Security ──────────────────────────────────────────────────────────────────
+export { createHelmetMiddleware } from './security/helmet.js'
+export { createCorsMiddleware } from './security/cors.js'
+export { createRateLimitMiddleware } from './security/ratelimit.js'
+export { createSanitizeMiddleware } from './security/sanitize.js'
+export { createAuthMiddleware, AuthError } from './auth/middleware.js'
+
+// ── RBAC ──────────────────────────────────────────────────────────────────────
+export { getEffectiveRoles, extractRoleFromHeader, hasPermission } from './rbac/roles.js'
+export { createPermissionMiddleware } from './rbac/permissions.js'
+
+// ── Docs ──────────────────────────────────────────────────────────────────────
+export { generateOpenAPISpec } from './docs/swagger.js'
+export { renderScalarPage, mountScalarDocs } from './docs/scalar.js'
+
+// ── Deploy ────────────────────────────────────────────────────────────────────
+export { generateRailwayConfig, getRailwayDeployButton } from './deploy/external/railway.js'
+export { generateRenderConfig, getRenderDeployButton } from './deploy/external/render.js'
+export { generateVercelConfig, getVercelDeployButton } from './deploy/external/vercel.js'
+export { generateFlyConfig, getFlyDeployButton } from './deploy/external/flyio.js'
+
+// ── Query ─────────────────────────────────────────────────────────────────────
+export { parseQueryParams, toPrismaQuery } from './query/builder.js'
+export { applyFilters, applySorts, applyPagination, applyQuery } from './query/apply.js'
+
+// ── Relations ─────────────────────────────────────────────────────────────────
+export { applyIncludes, renderRelationFields, renderJoinModels } from './relations/index.js'
+
+// ── Transactions ──────────────────────────────────────────────────────────────
+export { executeTransaction } from './transactions/executor.js'
+
+// ── Upload ────────────────────────────────────────────────────────────────────
+export { uploadFile, validateFile, parseMaxSize, processFileFields } from './upload/index.js'
+export { uploadLocal } from './upload/providers/local.js'
+export { generatePresignedPutUrl } from './upload/providers/s3.js'
+
+// ── Hooks (Chantier 1) ────────────────────────────────────────────────────────
+export { executeHook } from './hooks/runner.js'
+export type { HandlerContext, HandlerFn } from './hooks/types.js'
+
+// ── Observability (Chantier 2) ────────────────────────────────────────────────
+export { createLogger } from './observability/logger.js'
+export { createRequestIdMiddleware } from './observability/requestId.js'
+export type { Logger, LogLevel } from './observability/logger.js'
+
+// ── Rate Limit Stores (Chantier 3) ────────────────────────────────────────────
+export { MemoryRateLimitStore } from './ratelimit/memoryStore.js'
+export { RedisRateLimitStore } from './ratelimit/redisStore.js'
+export type { RateLimitStore } from './ratelimit/store.js'
+export type { RedisLike } from './ratelimit/redisStore.js'
+
+// ── Env Validation (Chantier 4) ───────────────────────────────────────────────
+export { validateEnv, assertEnv } from './env/validate.js'
+export type { EnvValidationResult } from './env/validate.js'
+
+// ── Auth Flows (Chantier 5) ───────────────────────────────────────────────────
+export { mountAuthFlows } from './auth/flows/index.js'
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+export type {
+  ZeroAPISpec, ResourceDefinition, FieldDefinition, FieldType, CrudAction,
+  AuthConfig, GlobalAuthConfig, ResourceHooks, CustomEndpointDef, HttpMethod,
+  RoleDefinition, ResourceRBAC, RateLimitConfig, CorsConfig, SecurityConfig,
+  RelationDefinition, RelationType,
+  TxOperation, TxAction, TransactionConfig,
+  AuthFlowsConfig, LockoutConfig,
+} from './types/spec.js'
+
+export type { RuntimeResult, RuntimeOptions } from './runtime/index.js'
+export type { ResourceSchemas } from './generators/validation.js'
+export type { DataStore, ResourceStore } from './types/store.js'
+export type { OpenAPISpec } from './docs/swagger.js'
+export type { ParsedQuery, FilterMap, SortSpec, PaginationSpec } from './query/builder.js'
+export type { QueryResult } from './query/apply.js'
+export type { TxResult } from './transactions/executor.js'
+export type { UploadResult, UploadError } from './upload/index.js'
+export type { S3Config, PresignedUrlResult } from './upload/providers/s3.js'
+export type { LocalUploadResult } from './upload/providers/local.js'
