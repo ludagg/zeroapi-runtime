@@ -1,9 +1,9 @@
-# @zeroapi/runtime
+# @ludagg/zeroapi-runtime
 
 Generate a complete, secured, tested REST API from a JSON spec — no scaffolding, no boilerplate.
 
 ```ts
-import { parseSpec, createRuntime } from '@zeroapi/runtime'
+import { parseSpec, createRuntime } from '@ludagg/zeroapi-runtime'
 
 const spec = parseSpec({
   version: '1.0.0',
@@ -51,7 +51,7 @@ That's it. You get: `GET/POST /posts`, `GET/PUT/DELETE /posts/:id`, Zod validati
 ## Installation
 
 ```bash
-npm install @zeroapi/runtime
+npm install @ludagg/zeroapi-runtime
 ```
 
 Peer dependencies: `hono`, `zod` (already bundled — no manual install needed for typical use).
