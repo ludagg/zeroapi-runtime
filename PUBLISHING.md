@@ -1,4 +1,4 @@
-# Publishing `@zeroapi/runtime` to npm
+# Publishing `@ludagg/zeroapi-runtime` to npm
 
 La publication est automatique : tout push sur `main` déclenche le workflow
 `.github/workflows/publish.yml` qui lance les tests, le build, puis `npm publish`.
@@ -11,7 +11,7 @@ La publication est automatique : tout push sur `main` déclenche le workflow
 2. Cliquez sur votre avatar → **Access Tokens**.
 3. **Generate New Token** → choisissez **Granular Access Token** (recommandé) :
    - Expiration : selon votre politique (90 jours est un bon défaut)
-   - Packages : sélectionnez `@zeroapi/runtime` → permission **Read and Write**
+   - Packages : sélectionnez `@ludagg/zeroapi-runtime` → permission **Read and Write**
    - Ou choisissez **Automation** (classic token) si vous préférez la simplicité.
 4. Copiez le token immédiatement — il n'est affiché qu'une seule fois.
 
@@ -59,13 +59,13 @@ Depuis l'onglet **Actions** du dépôt → sélectionnez **Publish to npm** →
 ## 4. Vérifier la publication
 
 ```bash
-npm info @zeroapi/runtime
+npm info @ludagg/zeroapi-runtime
 # ou
-npx @zeroapi/runtime --version   # si un bin est déclaré
+npx @ludagg/zeroapi-runtime --version   # si un bin est déclaré
 ```
 
 La page du package sera disponible sur :
-`https://www.npmjs.com/package/@zeroapi/runtime`
+`https://www.npmjs.com/package/@ludagg/zeroapi-runtime`
 
 ---
 
@@ -75,7 +75,7 @@ Seul le dossier `dist/` est inclus dans le package (défini par `"files": ["dist
 dans `package.json` et confirmé par `.npmignore`).
 
 ```
-@zeroapi/runtime@0.1.0
+@ludagg/zeroapi-runtime@0.1.0
 └── dist/
     ├── index.js       # CommonJS
     ├── index.mjs      # ESM
