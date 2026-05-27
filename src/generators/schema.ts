@@ -24,15 +24,25 @@ function renderField(name: string, field: FieldDefinition): string {
   return `  ${name.padEnd(14)}${prismaType}${optional}${unique}${defaultClause}`
 }
 
+const RESERVED_FIELDS = new Set(['id', 'createdAt', 'updatedAt'])
+
 function renderModel(resource: ResourceDefinition, allResources: ResourceDefinition[]): string {
   const modelName = resource.name.charAt(0).toUpperCase() + resource.name.slice(1)
+
+  // FK fields owned by relations — must not be re-declared from spec fields
+  const relationFkFields = new Set<string>()
+  for (const rel of resource.relations ?? []) {
+    if (rel.type === 'manyToOne' || rel.type === 'oneToOne') {
+      relationFkFields.add(rel.field ?? `${rel.resource.toLowerCase()}Id`)
+    }
+  }
 
   const baseFields = [
     `  id            String   @id @default(cuid())`,
     `  createdAt     DateTime @default(now())`,
     `  updatedAt     DateTime @updatedAt`,
     ...Object.entries(resource.fields)
-      .filter(([, field]) => field.type !== 'file' || true) // file fields → String (URL)
+      .filter(([name]) => !RESERVED_FIELDS.has(name) && !relationFkFields.has(name))
       .map(([name, field]) => renderField(name, field)),
   ]
 

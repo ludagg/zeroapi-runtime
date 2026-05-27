@@ -51,4 +51,52 @@ describe('generatePrismaSchema', () => {
     expect(schema).toContain('test-api')
     expect(schema).toContain('1.0.0')
   })
+
+  it('does not duplicate reserved fields when declared in the spec', () => {
+    const schema = generatePrismaSchema({
+      version: '1.0.0',
+      name: 'dup-api',
+      resources: [
+        {
+          name: 'Thing',
+          fields: {
+            id:        { type: 'uuid',     required: true },
+            createdAt: { type: 'datetime', required: true },
+            updatedAt: { type: 'datetime', required: true },
+            label:     { type: 'string',   required: true },
+          },
+        },
+      ],
+    })
+
+    const thingBlock = schema.match(/model Thing \{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(thingBlock.match(/^\s*id\s/gm)?.length).toBe(1)
+    expect(thingBlock.match(/^\s*createdAt\s/gm)?.length).toBe(1)
+    expect(thingBlock.match(/^\s*updatedAt\s/gm)?.length).toBe(1)
+    expect(thingBlock).toContain('label')
+  })
+
+  it('does not re-declare a FK field already owned by a relation', () => {
+    const schema = generatePrismaSchema({
+      version: '1.0.0',
+      name: 'rel-api',
+      resources: [
+        {
+          name: 'User',
+          fields: { email: { type: 'email', required: true, unique: true } },
+        },
+        {
+          name: 'Post',
+          fields: {
+            title:  { type: 'string', required: true },
+            userId: { type: 'uuid',   required: true },
+          },
+          relations: [{ type: 'manyToOne', resource: 'User', field: 'userId', required: true }],
+        },
+      ],
+    })
+
+    const postBlock = schema.match(/model Post \{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(postBlock.match(/^\s*userId\s/gm)?.length).toBe(1)
+  })
 })
