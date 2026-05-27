@@ -15,7 +15,7 @@ export function renderRelationFields(
 
   for (const rel of resource.relations ?? []) {
     const modelName = rel.resource.charAt(0).toUpperCase() + rel.resource.slice(1)
-    const onDelete = rel.onDelete ? ` onDelete: ${rel.onDelete}` : ''
+    const onDelete = rel.onDelete ? `, onDelete: ${rel.onDelete}` : ''
 
     switch (rel.type) {
       case 'manyToOne': {
@@ -89,7 +89,7 @@ export function renderJoinModels(
       return `  ${name.padEnd(14)}${prismaType}${opt}`
     })
 
-    const onDelete = rel.onDelete ? ` onDelete: ${rel.onDelete}` : ''
+    const onDelete = rel.onDelete ? `, onDelete: ${rel.onDelete}` : ''
     models.push(
       `model ${joinModel} {\n` +
       `  ${thisFk.padEnd(14)}String\n` +

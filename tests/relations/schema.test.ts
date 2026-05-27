@@ -56,6 +56,11 @@ describe('generatePrismaSchema with relations', () => {
     expect(schema).toContain('onDelete: Cascade')
   })
 
+  it('separates @relation arguments with commas (Prisma 5.x syntax)', () => {
+    const schema = generatePrismaSchema(relationsSpec)
+    expect(schema).toMatch(/references: \[id\], onDelete: Cascade/)
+  })
+
   it('generates reverse array field on related model (User.orders)', () => {
     const schema = generatePrismaSchema(relationsSpec)
     expect(schema).toMatch(/orders\s+Order\[\]/)
