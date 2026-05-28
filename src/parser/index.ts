@@ -4,20 +4,24 @@ import type { ZeroAPISpec, ResourceDefinition } from '../types/spec.js'
 // ── Field ─────────────────────────────────────────────────────────────────────
 
 const FieldTypeSchema = z.enum([
-  'string', 'text', 'number', 'integer', 'boolean',
-  'date', 'datetime', 'email', 'url', 'uuid', 'file',
+  'string', 'text', 'number', 'integer', 'decimal', 'boolean',
+  'date', 'datetime', 'email', 'url', 'uuid',
+  'file', 'file[]',
+  'json', 'enum',
 ])
 
 const FieldDefinitionSchema = z.object({
   type: FieldTypeSchema,
   required: z.boolean().optional(),
   unique: z.boolean().optional(),
-  default: z.union([z.string(), z.number(), z.boolean(), z.null()]).optional(),
+  index: z.boolean().optional(),
+  default: z.any().optional(),
   min: z.number().optional(),
   max: z.number().optional(),
   minLength: z.number().optional(),
   maxLength: z.number().optional(),
   description: z.string().optional(),
+  values: z.array(z.string()).optional(),
   // file-specific
   accept: z.array(z.string()).optional(),
   maxSize: z.string().optional(),
@@ -54,7 +58,7 @@ const ResourceRBACSchema = z.object({
   delete: z.array(z.string()).optional(),
 })
 
-// Relations
+// Relations (per-resource, legacy)
 const RelationDefinitionSchema = z.object({
   type: z.enum(['oneToOne', 'oneToMany', 'manyToOne', 'manyToMany']),
   resource: z.string().min(1),
@@ -93,12 +97,47 @@ const ResourceDefinitionSchema = z.object({
   rbac: ResourceRBACSchema.optional(),
   relations: z.array(RelationDefinitionSchema).optional(),
   transactions: z.array(TransactionConfigSchema).optional(),
+  softDelete: z.boolean().optional(),
+  timestamps: z.boolean().optional(),
+  searchable: z.array(z.string()).optional(),
 })
 
 // ── Global config ─────────────────────────────────────────────────────────────
 
+const JwtAuthConfigSchema = z.object({
+  accessTokenTTL: z.string().optional(),
+  refreshTokenTTL: z.string().optional(),
+  secretEnv: z.string().optional(),
+})
+
+const ApiKeyAuthConfigSchema = z.object({
+  enabled: z.boolean(),
+  header: z.string().optional(),
+  prefix: z.string().optional(),
+})
+
+const OAuthProviderConfigSchema = z.object({
+  name: z.enum(['google', 'apple', 'github']),
+  clientIdEnv: z.string().min(1),
+  clientSecretEnv: z.string().min(1),
+  scopes: z.array(z.string()).optional(),
+})
+
+const OAuthConfigSchema = z.object({
+  providers: z.array(OAuthProviderConfigSchema).min(1),
+})
+
 const GlobalAuthConfigSchema = z.object({
-  strategy: z.enum(['jwt', 'apikey', 'bearer']),
+  // Modern shape (all optional so the legacy shape remains valid)
+  enabled: z.boolean().optional(),
+  strategies: z.array(z.enum(['jwt', 'apikey', 'oauth'])).optional(),
+  jwt: JwtAuthConfigSchema.optional(),
+  apikey: ApiKeyAuthConfigSchema.optional(),
+  oauth: OAuthConfigSchema.optional(),
+  emailVerification: z.boolean().optional(),
+  passwordReset: z.boolean().optional(),
+  // Legacy shape
+  strategy: z.enum(['jwt', 'apikey', 'bearer']).optional(),
   secret: z.string().optional(),
   header: z.string().optional(),
 })
@@ -132,6 +171,74 @@ const SecurityConfigSchema = z.object({
   referrerPolicy: z.string().optional(),
 })
 
+// ── Phase 0: new optional top-level blocks ────────────────────────────────────
+
+const SpecRelationSchema = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+  type: z.enum(['one-to-one', 'one-to-many', 'many-to-one', 'many-to-many']),
+  field: z.string().min(1),
+  through: z.string().optional(),
+  onDelete: z.enum(['cascade', 'set-null', 'restrict']).optional(),
+})
+
+const EnvVarDefinitionSchema = z.object({
+  name: z.string().min(1),
+  required: z.boolean(),
+  description: z.string().optional(),
+  example: z.string().optional(),
+  generate: z.boolean().optional(),
+  managedByCloud: z.boolean().optional(),
+})
+
+const PermissionRuleSchema = z.object({
+  role: z.string().min(1),
+  actions: z.array(z.enum(['create', 'read', 'update', 'delete'])).min(1),
+  ownOnly: z.boolean().optional(),
+})
+
+const PermissionDefinitionSchema = z.object({
+  resource: z.string().min(1),
+  rules: z.array(PermissionRuleSchema).min(1),
+})
+
+const FileUploadFeatureSchema = z.object({
+  enabled: z.boolean(),
+  provider: z.enum(['s3', 'r2', 'local']),
+  maxSizeMB: z.number().positive(),
+  allowedTypes: z.array(z.string()),
+})
+
+const WebhooksFeatureSchema = z.object({
+  outbound: z.array(z.string()).optional(),
+  inbound: z.array(z.string()).optional(),
+})
+
+const SearchFeatureSchema = z.object({
+  enabled: z.boolean(),
+  fuzzy: z.boolean().optional(),
+})
+
+const RateLimitFeatureSchema = z.object({
+  perKey: z.string().optional(),
+  public: z.string().optional(),
+})
+
+const PaginationFeatureSchema = z.object({
+  defaultLimit: z.number().int().positive().optional(),
+  maxLimit: z.number().int().positive().optional(),
+})
+
+const FeaturesConfigSchema = z.object({
+  fileUpload: FileUploadFeatureSchema.optional(),
+  webhooks: WebhooksFeatureSchema.optional(),
+  search: SearchFeatureSchema.optional(),
+  rateLimit: RateLimitFeatureSchema.optional(),
+  pagination: PaginationFeatureSchema.optional(),
+})
+
+// ── Root ──────────────────────────────────────────────────────────────────────
+
 const ZeroAPISpecSchema = z.object({
   version: z.string().min(1, 'Version is required'),
   name: z.string().min(1, 'Spec name is required'),
@@ -143,6 +250,21 @@ const ZeroAPISpecSchema = z.object({
   cors: CorsConfigSchema.optional(),
   security: SecurityConfigSchema.optional(),
   resources: z.array(ResourceDefinitionSchema).min(1, 'Spec must define at least one resource'),
+  authFlows: z.object({
+    emailVerification: z.boolean().optional(),
+    passwordReset: z.boolean().optional(),
+    refreshTokens: z.boolean().optional(),
+    revocation: z.boolean().optional(),
+    lockout: z.object({
+      maxAttempts: z.number().int().positive(),
+      windowMs: z.number().int().positive(),
+    }).optional(),
+  }).optional(),
+  requiredEnv: z.array(z.string()).optional(),
+  relations: z.array(SpecRelationSchema).optional(),
+  env: z.array(EnvVarDefinitionSchema).optional(),
+  permissions: z.array(PermissionDefinitionSchema).optional(),
+  features: FeaturesConfigSchema.optional(),
 })
 
 // ── Relation semantic validation ──────────────────────────────────────────────
@@ -185,6 +307,30 @@ function validateRelations(resources: ResourceDefinition[]): string | null {
   return null
 }
 
+function validateSpecLevelBlocks(spec: ZeroAPISpec): string | null {
+  const names = new Set(spec.resources.map((r) => r.name))
+
+  for (const rel of spec.relations ?? []) {
+    if (!names.has(rel.from)) {
+      return `Top-level relation references unknown resource "${rel.from}" in "from"`
+    }
+    if (!names.has(rel.to)) {
+      return `Top-level relation "${rel.from}" → "${rel.to}" references unknown resource "${rel.to}"`
+    }
+    if (rel.type === 'many-to-many' && !rel.through) {
+      return `Top-level many-to-many relation "${rel.from}" → "${rel.to}" requires a "through" field`
+    }
+  }
+
+  for (const perm of spec.permissions ?? []) {
+    if (!names.has(perm.resource)) {
+      return `Permission rule references unknown resource "${perm.resource}"`
+    }
+  }
+
+  return null
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export class ParseError extends Error {
@@ -199,7 +345,8 @@ export class ParseError extends Error {
 
 /**
  * Parses and validates a raw object against the ZeroAPI DSL schema.
- * Performs structural validation (Zod) followed by semantic checks (relation integrity).
+ * Performs structural validation (Zod) followed by semantic checks
+ * (per-resource relation integrity + top-level relations/permissions).
  * Throws ParseError with field-level details on failure.
  */
 export function parseSpec(raw: unknown): ZeroAPISpec {
@@ -218,6 +365,14 @@ export function parseSpec(raw: unknown): ZeroAPISpec {
       { code: z.ZodIssueCode.custom, message: relError, path: ['resources'] },
     ])
     throw new ParseError(`Invalid ZeroAPI spec — ${relError}`, relZodError)
+  }
+
+  const topLevelError = validateSpecLevelBlocks(spec)
+  if (topLevelError) {
+    const zodError = new z.ZodError([
+      { code: z.ZodIssueCode.custom, message: topLevelError, path: [] },
+    ])
+    throw new ParseError(`Invalid ZeroAPI spec — ${topLevelError}`, zodError)
   }
 
   return spec

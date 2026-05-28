@@ -53,17 +53,21 @@ export interface OpenAPISpec {
 // ── Field mapping ─────────────────────────────────────────────────────────────
 
 const TYPE_MAP: Record<FieldType, JSONSchema> = {
-  string:   { type: 'string' },
-  text:     { type: 'string' },
-  number:   { type: 'number' },
-  integer:  { type: 'integer' },
-  boolean:  { type: 'boolean' },
-  date:     { type: 'string', format: 'date' },
-  datetime: { type: 'string', format: 'date-time' },
-  email:    { type: 'string', format: 'email' },
-  url:      { type: 'string', format: 'uri' },
-  uuid:     { type: 'string', format: 'uuid' },
-  file:     { type: 'string', format: 'uri', description: 'URL of the uploaded file' },
+  string:    { type: 'string' },
+  text:      { type: 'string' },
+  number:    { type: 'number' },
+  integer:   { type: 'integer' },
+  decimal:   { type: 'number' },
+  boolean:   { type: 'boolean' },
+  date:      { type: 'string', format: 'date' },
+  datetime:  { type: 'string', format: 'date-time' },
+  email:     { type: 'string', format: 'email' },
+  url:       { type: 'string', format: 'uri' },
+  uuid:      { type: 'string', format: 'uuid' },
+  file:      { type: 'string', format: 'uri', description: 'URL of the uploaded file' },
+  'file[]':  { type: 'array', description: 'List of uploaded file URLs' },
+  json:      { type: 'object' },
+  enum:      { type: 'string' },
 }
 
 function fieldToJsonSchema(field: FieldDefinition): JSONSchema {

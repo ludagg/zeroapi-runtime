@@ -3,9 +3,12 @@ import { renderRelationFields, renderJoinModels } from '../relations/index.js'
 
 const PRISMA_TYPE_MAP: Record<FieldType, string> = {
   string: 'String', text: 'String', email: 'String', url: 'String', uuid: 'String',
-  number: 'Float', integer: 'Int', boolean: 'Boolean',
+  number: 'Float', integer: 'Int', decimal: 'Decimal', boolean: 'Boolean',
   date: 'DateTime', datetime: 'DateTime',
-  file: 'String',  // stored as URL
+  file: 'String',        // stored as URL
+  'file[]': 'String',    // stored as URL list (schema-level rendering handled in Phase 1+)
+  json: 'Json',
+  enum: 'String',        // enum rendering handled in Phase 1+
 }
 
 function renderField(name: string, field: FieldDefinition): string {

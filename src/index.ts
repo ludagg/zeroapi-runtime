@@ -74,6 +74,13 @@ export type {
   RelationDefinition, RelationType,
   TxOperation, TxAction, TransactionConfig,
   AuthFlowsConfig, LockoutConfig,
+  // Phase 0
+  JwtAuthConfig, ApiKeyAuthConfig, OAuthConfig, OAuthProviderConfig, OAuthProviderName,
+  SpecRelation, SpecRelationType,
+  EnvVarDefinition,
+  PermissionDefinition, PermissionRule, PermissionAction,
+  FeaturesConfig, FileUploadFeature, WebhooksFeature, SearchFeature,
+  RateLimitFeature, PaginationFeature,
 } from './types/spec.js'
 
 export type { RuntimeResult, RuntimeOptions } from './runtime/index.js'

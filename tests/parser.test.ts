@@ -38,7 +38,7 @@ describe('parseSpec', () => {
         version: '1.0',
         name: 'api',
         resources: [
-          { name: 'Broken', fields: { x: { type: 'json' } } },
+          { name: 'Broken', fields: { x: { type: 'nonsense' } } },
         ],
       })
     ).toThrow(ParseError)
@@ -62,7 +62,11 @@ describe('parseSpec', () => {
   })
 
   it('accepts all valid field types', () => {
-    const types = ['string', 'text', 'number', 'integer', 'boolean', 'date', 'datetime', 'email', 'url', 'uuid'] as const
+    const types = [
+      'string', 'text', 'number', 'integer', 'decimal', 'boolean',
+      'date', 'datetime', 'email', 'url', 'uuid',
+      'file', 'file[]', 'json', 'enum',
+    ] as const
     for (const type of types) {
       expect(() =>
         parseSpec({

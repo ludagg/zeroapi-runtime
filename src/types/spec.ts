@@ -1,21 +1,25 @@
 /** Supported primitive field types in the ZeroAPI DSL. */
 export type FieldType =
-  | 'string' | 'text' | 'number' | 'integer' | 'boolean'
+  | 'string' | 'text' | 'number' | 'integer' | 'decimal' | 'boolean'
   | 'date' | 'datetime' | 'email' | 'url' | 'uuid'
-  | 'file'
+  | 'file' | 'file[]'
+  | 'json' | 'enum'
 
 /** Definition of a single resource field, including optional file-specific constraints. */
 export interface FieldDefinition {
   type: FieldType
   required?: boolean
   unique?: boolean
-  default?: string | number | boolean | null
+  index?: boolean
+  default?: unknown
   min?: number
   max?: number
   minLength?: number
   maxLength?: number
   description?: string
-  // ── file-specific (only valid when type === 'file') ──────────────────────
+  /** Allowed values when type === 'enum'. */
+  values?: string[]
+  // ── file-specific (only valid when type === 'file' | 'file[]') ───────────
   accept?: string[]
   maxSize?: string       // e.g. "5MB"
   storage?: 'r2' | 's3' | 'local'
@@ -71,7 +75,7 @@ export interface ResourceRBAC {
   delete?: string[]
 }
 
-// ── Relations ─────────────────────────────────────────────────────────────────
+// ── Relations (per-resource, legacy) ──────────────────────────────────────────
 
 export type RelationType = 'oneToOne' | 'oneToMany' | 'manyToOne' | 'manyToMany'
 
@@ -124,12 +128,61 @@ export interface ResourceDefinition {
   relations?: RelationDefinition[]
   transactions?: TransactionConfig[]
   customEndpoints?: CustomEndpointDef[]
+  /** Soft-delete: keep rows and mark a deletedAt column. */
+  softDelete?: boolean
+  /** Auto-managed createdAt/updatedAt columns (default: true). */
+  timestamps?: boolean
+  /** Field names indexed for full-text search. */
+  searchable?: string[]
 }
 
 // ── Global config ─────────────────────────────────────────────────────────────
 
+/**
+ * Top-level auth configuration.
+ *
+ * Two shapes are accepted (both backwards-compatible):
+ *   - Legacy: { strategy, secret?, header? } — single strategy
+ *   - Modern: { enabled, strategies, jwt?, apikey?, oauth?, ... } — multi-strategy
+ *
+ * All fields are optional at the type level; the parser fills defaults.
+ */
+export interface JwtAuthConfig {
+  accessTokenTTL?: string
+  refreshTokenTTL?: string
+  secretEnv?: string
+}
+
+export interface ApiKeyAuthConfig {
+  enabled: boolean
+  header?: string
+  prefix?: string
+}
+
+export type OAuthProviderName = 'google' | 'apple' | 'github'
+
+export interface OAuthProviderConfig {
+  name: OAuthProviderName
+  clientIdEnv: string
+  clientSecretEnv: string
+  scopes?: string[]
+}
+
+export interface OAuthConfig {
+  providers: OAuthProviderConfig[]
+}
+
 export interface GlobalAuthConfig {
-  strategy: 'jwt' | 'apikey' | 'bearer'
+  // ── Modern shape ───────────────────────────────────────────────────────
+  enabled?: boolean
+  strategies?: ('jwt' | 'apikey' | 'oauth')[]
+  jwt?: JwtAuthConfig
+  apikey?: ApiKeyAuthConfig
+  oauth?: OAuthConfig
+  emailVerification?: boolean
+  passwordReset?: boolean
+  // ── Legacy shape (kept for backwards compatibility) ────────────────────
+  strategy?: 'jwt' | 'apikey' | 'bearer'
   secret?: string
   header?: string
 }
@@ -185,6 +238,89 @@ export interface AuthFlowsConfig {
   lockout?: LockoutConfig
 }
 
+// ── Top-level relations (Phase 0) ─────────────────────────────────────────────
+
+export type SpecRelationType = 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many'
+
+export interface SpecRelation {
+  /** Name of the source resource (must exist in spec.resources). */
+  from: string
+  /** Name of the target resource (must exist in spec.resources). */
+  to: string
+  type: SpecRelationType
+  /** Field name on the source side. */
+  field: string
+  /** Join table name — required for many-to-many. */
+  through?: string
+  onDelete?: 'cascade' | 'set-null' | 'restrict'
+}
+
+// ── Env declarations (Phase 0) ────────────────────────────────────────────────
+
+export interface EnvVarDefinition {
+  name: string
+  required: boolean
+  description?: string
+  example?: string
+  /** When true, ZeroAPI generates a random value at deploy. */
+  generate?: boolean
+  /** When true, ZeroAPI Cloud manages the secret. */
+  managedByCloud?: boolean
+}
+
+// ── Permissions (Phase 0) ─────────────────────────────────────────────────────
+
+export type PermissionAction = 'create' | 'read' | 'update' | 'delete'
+
+export interface PermissionRule {
+  role: string
+  actions: PermissionAction[]
+  /** Restrict the rule to rows owned by the requester. */
+  ownOnly?: boolean
+}
+
+export interface PermissionDefinition {
+  resource: string
+  rules: PermissionRule[]
+}
+
+// ── Features (Phase 0) ────────────────────────────────────────────────────────
+
+export interface FileUploadFeature {
+  enabled: boolean
+  provider: 's3' | 'r2' | 'local'
+  maxSizeMB: number
+  allowedTypes: string[]
+}
+
+export interface WebhooksFeature {
+  outbound?: string[]
+  inbound?: string[]
+}
+
+export interface SearchFeature {
+  enabled: boolean
+  fuzzy?: boolean
+}
+
+export interface RateLimitFeature {
+  perKey?: string
+  public?: string
+}
+
+export interface PaginationFeature {
+  defaultLimit?: number
+  maxLimit?: number
+}
+
+export interface FeaturesConfig {
+  fileUpload?: FileUploadFeature
+  webhooks?: WebhooksFeature
+  search?: SearchFeature
+  rateLimit?: RateLimitFeature
+  pagination?: PaginationFeature
+}
+
 // ── Root spec ─────────────────────────────────────────────────────────────────
 
 export interface ZeroAPISpec {
@@ -202,4 +338,12 @@ export interface ZeroAPISpec {
   authFlows?: AuthFlowsConfig
   /** Chantier 4: env var names that must be set at startup (validated by assertEnv). */
   requiredEnv?: string[]
+  /** Phase 0: top-level relations across resources. */
+  relations?: SpecRelation[]
+  /** Phase 0: declared environment variables. */
+  env?: EnvVarDefinition[]
+  /** Phase 0: declarative role-based permissions. */
+  permissions?: PermissionDefinition[]
+  /** Phase 0: optional cross-cutting features (uploads, webhooks, search, ...). */
+  features?: FeaturesConfig
 }
