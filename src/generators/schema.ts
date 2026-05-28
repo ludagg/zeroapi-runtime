@@ -25,7 +25,10 @@ function renderField(name: string, field: FieldDefinition): string {
         : ` @default(${String(field.default)})`
   }
 
-  return `  ${name.padEnd(14)}${prismaType}${optional}${unique}${defaultClause}`
+  // Pad to column 14 for short names; for names ≥ 13 chars guarantee at least
+  // 2 spaces before the type so we never produce e.g. "priceAtPurchaseDecimal".
+  const paddedName = name.padEnd(Math.max(14, name.length + 2))
+  return `  ${paddedName}${prismaType}${optional}${unique}${defaultClause}`
 }
 
 const RESERVED_FIELDS = new Set(['id', 'createdAt', 'updatedAt'])
