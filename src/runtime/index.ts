@@ -13,6 +13,9 @@ import { generateZodSchemas } from '../generators/validation.js'
 import { generateTests } from '../generators/tests.js'
 import { createAuthMiddleware } from '../auth/middleware.js'
 import { mountAuthFlows } from '../auth/flows/index.js'
+import { MemoryApiKeyStore, type ApiKeyStore } from '../auth/apikey-store.js'
+import { mountApiKeyRoutes } from '../auth/apikey-routes.js'
+import { bootstrapMemoryApiKeysSync, bootstrapApiKeys, type BootstrapLogger } from '../auth/apikey-bootstrap.js'
 import { createHelmetMiddleware } from '../security/helmet.js'
 import { createCorsMiddleware } from '../security/cors.js'
 import { createRateLimitMiddleware } from '../security/ratelimit.js'
@@ -38,6 +41,10 @@ export interface RuntimeOptions {
   rateLimitStore?: RateLimitStore
   /** Chantier 4: Validate required env vars at startup; throws with a clear error on failure. */
   validateEnv?: boolean
+  /** Phase 1.1: Custom API-key store. Defaults to an in-memory store when apikey auth is enabled. */
+  apiKeyStore?: ApiKeyStore
+  /** Phase 1.1: Receives bootstrap log lines instead of console.log. Useful in tests. */
+  apiKeyBootstrapLogger?: BootstrapLogger
 }
 
 export interface RuntimeResult {
@@ -78,6 +85,8 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     handlers       = {},
     rateLimitStore,
     validateEnv: doValidateEnv = false,
+    apiKeyStore: providedApiKeyStore,
+    apiKeyBootstrapLogger,
   } = options
 
   // Chantier 4: Fail fast on missing env vars
@@ -111,7 +120,25 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     c.json({ status: 'ready', timestamp: new Date().toISOString() })
   )
 
-  const authMiddleware = spec.auth ? createAuthMiddleware(spec.auth) : undefined
+  // Phase 1.1: real API-key verification — wire a store and bootstrap an initial key
+  const apiKeyAuthEnabled =
+    spec.auth?.strategy === 'apikey' || spec.auth?.apikey?.enabled === true
+  let apiKeyStore: ApiKeyStore | undefined
+  if (spec.auth && apiKeyAuthEnabled) {
+    apiKeyStore = providedApiKeyStore ?? new MemoryApiKeyStore()
+    if (apiKeyStore instanceof MemoryApiKeyStore) {
+      bootstrapMemoryApiKeysSync(spec.auth, apiKeyStore, apiKeyBootstrapLogger)
+    } else {
+      void bootstrapApiKeys(spec.auth, apiKeyStore, apiKeyBootstrapLogger)
+    }
+  }
+
+  const authMiddleware = spec.auth ? createAuthMiddleware(spec.auth, apiKeyStore) : undefined
+
+  // Phase 1.1: admin routes for managing API keys (protected by the auth middleware itself)
+  if (spec.auth && apiKeyStore && authMiddleware) {
+    mountApiKeyRoutes(app, spec.auth, apiKeyStore, authMiddleware)
+  }
 
   // Chantier 1: Routes with hooks + custom endpoints
   generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers)
