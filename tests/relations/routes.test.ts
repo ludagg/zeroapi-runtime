@@ -123,9 +123,11 @@ describe('Relations in routes', () => {
     expect(article?.category[0]?.label).toBe('Fiction')
   })
 
-  it('ignores unknown include param gracefully', async () => {
+  it('returns 400 for an unknown include param', async () => {
     const res = await app.request('/books?include=nonexistent')
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(400)
+    const body = await res.json() as { error: string }
+    expect(body.error).toBe('Unknown relation: nonexistent')
   })
 
   it('GET /authors?include= with oneToMany resolves books array', async () => {

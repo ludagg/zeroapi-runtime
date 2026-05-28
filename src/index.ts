@@ -102,7 +102,11 @@ export { parseQueryParams, toPrismaQuery } from './query/builder.js'
 export { applyFilters, applySorts, applyPagination, applyQuery } from './query/apply.js'
 
 // ── Relations ─────────────────────────────────────────────────────────────────
-export { applyIncludes, renderRelationFields, renderJoinModels } from './relations/index.js'
+export {
+  applyIncludes, renderRelationFields, renderJoinModels,
+  validateIncludes, normalizeTopLevelRelations,
+} from './relations/index.js'
+export type { IncludeValidationResult, IncludeOwnershipContext } from './relations/index.js'
 
 // ── Transactions ──────────────────────────────────────────────────────────────
 export { executeTransaction } from './transactions/executor.js'

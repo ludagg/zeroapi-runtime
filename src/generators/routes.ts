@@ -6,16 +6,19 @@ import type {
 } from '../types/spec.js'
 import type { DataStore, ResourceStore } from '../types/store.js'
 import type { HandlerFn } from '../hooks/types.js'
-import { generateZodSchemas } from './validation.js'
+import { generateZodSchemas, type ResourceSchemas } from './validation.js'
 import { createPermissionMiddleware } from '../rbac/permissions.js'
 import {
   buildResourcePermissionGuard,
   getOwnershipFilter,
+  getRequesterIdentity,
   resourceHasOwnOnly,
 } from '../rbac/resource-permissions.js'
 import { parseQueryParams } from '../query/builder.js'
 import { applyQuery } from '../query/apply.js'
-import { applyIncludes, extractNestedRelations, persistNestedRelations } from '../relations/index.js'
+import {
+  applyIncludes, extractNestedRelations, persistNestedRelations, validateIncludes,
+} from '../relations/index.js'
 import { executeTransaction } from '../transactions/executor.js'
 import { processFileFields } from '../upload/index.js'
 import { toPlural } from '../utils/plural.js'
@@ -138,46 +141,389 @@ async function readBody(
   }
 }
 
+/** Optional constraint applied to a handler by its mount context — used by
+ *  nested routes to force a parent FK on writes and filter on reads. */
+interface ParentScope {
+  field: string
+  value: string
+}
+
+interface ResourceHandlerBundle {
+  guards: {
+    list:   MiddlewareHandler | null
+    read:   MiddlewareHandler | null
+    create: MiddlewareHandler | null
+    update: MiddlewareHandler | null
+    delete: MiddlewareHandler | null
+  }
+  hasOwnOnly: boolean
+  handleList:   (c: Context, parent?: ParentScope) => Promise<Response> | Response
+  handleRead:   (c: Context, parent?: ParentScope) => Promise<Response> | Response
+  handleCreate: (c: Context, parent?: ParentScope) => Promise<Response>
+  handleUpdate: (c: Context, parent?: ParentScope) => Promise<Response>
+  handleDelete: (c: Context, parent?: ParentScope) => Promise<Response>
+}
+
+function buildResourceHandlerBundle(
+  resource: ResourceDefinition,
+  store: DataStore,
+  spec: ZeroAPISpec,
+  authMiddleware?: MiddlewareHandler,
+  uploadDir?: string,
+  handlers: Record<string, HandlerFn> = {},
+): ResourceHandlerBundle {
+  const key = resource.name.toLowerCase()
+  if (!store.has(key)) store.set(key, new Map())
+  const getStore = (): ResourceStore => store.get(key) as ResourceStore
+
+  const schemas: ResourceSchemas = generateZodSchemas(resource)
+  const hasOwnOnly = resourceHasOwnOnly(spec, resource.name)
+
+  const guards = {
+    list:   buildGuard(resource, 'list',   spec, authMiddleware),
+    read:   buildGuard(resource, 'read',   spec, authMiddleware),
+    create: buildGuard(resource, 'create', spec, authMiddleware),
+    update: buildGuard(resource, 'update', spec, authMiddleware),
+    delete: buildGuard(resource, 'delete', spec, authMiddleware),
+  }
+
+  const handleList = (c: Context, parent?: ParentScope): Response => {
+    const query = parseQueryParams(new URL(c.req.url))
+    const include = validateIncludes(query.include, resource)
+    if (!include.ok) {
+      return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
+    }
+
+    let items = Array.from(getStore().values())
+    if (parent) {
+      items = items.filter((item) => item[parent.field] === parent.value)
+    }
+
+    const ownership = getOwnershipFilter(c)
+    if (ownership) {
+      items = items.filter((item) => item['userId'] === ownership.userId)
+    }
+
+    const { data, count, nextCursor } = applyQuery(items, query)
+    const identity = getRequesterIdentity(c)
+    const enriched = applyIncludes(data, query.include, resource, spec, store, { userId: identity.userId })
+    return c.json({ data: enriched, count, ...(nextCursor ? { nextCursor } : {}) })
+  }
+
+  const handleRead = (c: Context, parent?: ParentScope): Response => {
+    const id = c.req.param('id') ?? ''
+    const item = getStore().get(id)
+    if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+
+    // Nested: hide cross-parent rows behind 404
+    if (parent && item[parent.field] !== parent.value) {
+      return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    }
+
+    // ownOnly: hide non-owned rows behind 404 so existence is not leaked.
+    const ownership = getOwnershipFilter(c)
+    if (ownership && item['userId'] !== ownership.userId) {
+      return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    }
+
+    const query = parseQueryParams(new URL(c.req.url))
+    const include = validateIncludes(query.include, resource)
+    if (!include.ok) {
+      return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
+    }
+
+    const identity = getRequesterIdentity(c)
+    const enriched = query.include.length > 0
+      ? applyIncludes([item], query.include, resource, spec, store, { userId: identity.userId })[0] ?? item
+      : item
+
+    return c.json({ data: enriched })
+  }
+
+  const handleCreate = async (c: Context, parent?: ParentScope): Promise<Response> => {
+    const read = await readBody(c, resource, uploadDir)
+    if (!read.ok) return read.res
+
+    // Nested: force FK from URL, overriding any client-supplied value.
+    if (parent) read.data[parent.field] = parent.value
+
+    // ownOnly create: requester owns the new row.
+    const ownership = getOwnershipFilter(c)
+    if (ownership) {
+      read.data['userId'] = ownership.userId
+    }
+
+    // Nested + ownOnly on the parent: when the FK column is the user id itself,
+    // the URL must match the authenticated identity (otherwise the requester
+    // would be creating a row "owned" by someone else through the URL).
+    if (parent && parent.field === 'userId' && ownership && parent.value !== ownership.userId) {
+      return c.json({ error: 'Forbidden — cannot create resources for another user' }, 403)
+    }
+
+    // Extract nested manyToMany data before validation
+    const { body: cleanBody, nested } = extractNestedRelations(read.data, resource)
+
+    // beforeCreate hook — can throw to cancel, can mutate cleanBody
+    if (resource.hooks?.beforeCreate) {
+      try {
+        await executeHook(resource.hooks.beforeCreate, handlers, cleanBody, c, store)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return c.json({ error: 'Hook rejected request', details: message }, 400)
+      }
+    }
+
+    // Validate primary fields only
+    const fileFieldKeys = Object.entries(resource.fields)
+      .filter(([, f]) => f.type === 'file')
+      .map(([k]) => k)
+
+    const schemaResult = schemas.create.safeParse(
+      Object.fromEntries(
+        Object.entries(cleanBody).filter(([k]) => !fileFieldKeys.includes(k))
+      )
+    )
+    if (!schemaResult.success) return validationError(c, schemaResult.error.issues)
+
+    // Transaction check
+    const txConfig = resource.transactions?.find((t) => t.trigger === 'POST')
+    if (txConfig) {
+      const txResult = await executeTransaction(txConfig.operations, cleanBody, store)
+      if (!txResult.success) {
+        return c.json(
+          { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
+          409
+        )
+      }
+    }
+
+    // FK fields from manyToOne/oneToOne relations are not in Zod schema — re-attach them
+    const fkFields = (resource.relations ?? [])
+      .filter((r) => r.type === 'manyToOne' || r.type === 'oneToOne')
+      .map((r) => r.field ?? `${r.resource.toLowerCase()}Id`)
+
+    const id  = randomUUID()
+    const now = new Date().toISOString()
+    const item: Record<string, unknown> = {
+      ...schemaResult.data,
+      ...Object.fromEntries(fkFields.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
+      // Re-attach file URLs (already uploaded, not part of Zod schema)
+      ...Object.fromEntries(fileFieldKeys.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
+      // ownOnly: pin userId from the authenticated identity (not part of Zod schema).
+      ...(hasOwnOnly && cleanBody['userId'] != null ? { userId: cleanBody['userId'] } : {}),
+      // Server-managed fields applied last so a client-supplied id/createdAt/updatedAt
+      // in the body cannot desync item.id from the store key.
+      id, createdAt: now, updatedAt: now,
+    }
+    getStore().set(id, item)
+
+    // Persist nested M2M join records atomically — rollback the main record on failure
+    if (nested.length > 0) {
+      try {
+        persistNestedRelations(id, nested, resource, store)
+      } catch (err) {
+        getStore().delete(id)
+        const message = err instanceof Error ? err.message : String(err)
+        return c.json({ error: 'Nested relation failed', details: message }, 409)
+      }
+    }
+
+    // afterCreate hook — fire-and-forget (failure does not roll back)
+    if (resource.hooks?.afterCreate) {
+      try {
+        await executeHook(resource.hooks.afterCreate, handlers, { ...item }, c, store)
+      } catch { /* intentional: after-hooks do not cancel completed operations */ }
+    }
+
+    return c.json({ data: item }, 201)
+  }
+
+  const handleUpdate = async (c: Context, parent?: ParentScope): Promise<Response> => {
+    const id = c.req.param('id') ?? ''
+    const existing = getStore().get(id)
+    if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+
+    if (parent && existing[parent.field] !== parent.value) {
+      return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    }
+
+    // ownOnly: editing someone else's row reports 404, not 403.
+    const ownership = getOwnershipFilter(c)
+    if (ownership && existing['userId'] !== ownership.userId) {
+      return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    }
+
+    const read = await readBody(c, resource, uploadDir)
+    if (!read.ok) return read.res
+
+    const result = schemas.update.safeParse(read.data)
+    if (!result.success) return validationError(c, result.error.issues)
+
+    const updateData: Record<string, unknown> = { ...(result.data as Record<string, unknown>) }
+
+    // beforeUpdate hook — can throw to cancel, can mutate updateData
+    if (resource.hooks?.beforeUpdate) {
+      try {
+        await executeHook(resource.hooks.beforeUpdate, handlers, updateData, c, store)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return c.json({ error: 'Hook rejected request', details: message }, 400)
+      }
+    }
+
+    const txConfig = resource.transactions?.find((t) => t.trigger === 'PUT')
+    if (txConfig) {
+      const txResult = await executeTransaction(txConfig.operations, read.data, store)
+      if (!txResult.success) {
+        return c.json(
+          { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
+          409
+        )
+      }
+    }
+
+    const fkFieldsUpd = (resource.relations ?? [])
+      .filter((r) => r.type === 'manyToOne' || r.type === 'oneToOne')
+      .map((r) => r.field ?? `${r.resource.toLowerCase()}Id`)
+
+    const updated: Record<string, unknown> = {
+      ...existing,
+      ...updateData,
+      ...Object.fromEntries(fkFieldsUpd.map((k) => [k, read.data[k]]).filter(([, v]) => v != null)),
+      // Server-managed fields applied last: id is pinned to the route param (the store key)
+      // and updatedAt is set by the server, so a client-supplied value in the body is ignored.
+      id,
+      updatedAt: new Date().toISOString(),
+      // ownOnly: ownership can never be transferred via PUT.
+      ...(hasOwnOnly && existing['userId'] != null ? { userId: existing['userId'] } : {}),
+      // Nested: parent FK is sticky — PUT cannot re-parent a child via body.
+      ...(parent ? { [parent.field]: parent.value } : {}),
+    }
+    getStore().set(id, updated)
+
+    // afterUpdate hook — fire-and-forget
+    if (resource.hooks?.afterUpdate) {
+      try {
+        await executeHook(resource.hooks.afterUpdate, handlers, { ...updated }, c, store)
+      } catch { /* intentional */ }
+    }
+
+    return c.json({ data: updated })
+  }
+
+  const handleDelete = async (c: Context, parent?: ParentScope): Promise<Response> => {
+    const id = c.req.param('id') ?? ''
+    const existing = getStore().get(id)
+    if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+
+    if (parent && existing[parent.field] !== parent.value) {
+      return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    }
+
+    // ownOnly: deleting someone else's row reports 404, not 403.
+    const ownership = getOwnershipFilter(c)
+    if (ownership && existing['userId'] !== ownership.userId) {
+      return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    }
+
+    // beforeDelete hook — can throw to cancel
+    if (resource.hooks?.beforeDelete) {
+      try {
+        await executeHook(resource.hooks.beforeDelete, handlers, { id }, c, store)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return c.json({ error: 'Hook rejected request', details: message }, 400)
+      }
+    }
+
+    const txConfig = resource.transactions?.find((t) => t.trigger === 'DELETE')
+    if (txConfig) {
+      const txResult = await executeTransaction(txConfig.operations, { id }, store)
+      if (!txResult.success) {
+        return c.json(
+          { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
+          409
+        )
+      }
+    }
+
+    getStore().delete(id)
+
+    // afterDelete hook — fire-and-forget
+    if (resource.hooks?.afterDelete) {
+      try {
+        await executeHook(resource.hooks.afterDelete, handlers, { id }, c, store)
+      } catch { /* intentional */ }
+    }
+
+    return c.json({ data: null })
+  }
+
+  return { guards, hasOwnOnly, handleList, handleRead, handleCreate, handleUpdate, handleDelete }
+}
+
+/**
+ * Collects "(parent, child, fk)" tuples for which nested routes should be
+ * generated. A pair is produced whenever the child resource declares a
+ * manyToOne/oneToOne back to a parent, or the parent declares a oneToMany
+ * pointing at the child. Each pair is emitted at most once.
+ */
+function collectNestedRelations(
+  spec: ZeroAPISpec,
+): Array<{ parent: ResourceDefinition; child: ResourceDefinition; fkField: string }> {
+  const out: Array<{ parent: ResourceDefinition; child: ResourceDefinition; fkField: string }> = []
+  const seen = new Set<string>()
+
+  // Driven by the FK side (manyToOne / oneToOne).
+  for (const child of spec.resources) {
+    for (const rel of child.relations ?? []) {
+      if (rel.type !== 'manyToOne' && rel.type !== 'oneToOne') continue
+      const parent = spec.resources.find((r) => r.name === rel.resource)
+      if (!parent) continue
+      const fkField = rel.field ?? `${parent.name.toLowerCase()}Id`
+      const key = `${parent.name}->${child.name}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ parent, child, fkField })
+    }
+  }
+
+  // Driven by the oneToMany side without a reverse manyToOne — fall back to
+  // the conventional FK on the child.
+  for (const parent of spec.resources) {
+    for (const rel of parent.relations ?? []) {
+      if (rel.type !== 'oneToMany') continue
+      const child = spec.resources.find((r) => r.name === rel.resource)
+      if (!child) continue
+      const key = `${parent.name}->${child.name}`
+      if (seen.has(key)) continue
+      const reverse = child.relations?.find(
+        (r) => r.resource === parent.name && (r.type === 'manyToOne' || r.type === 'oneToOne'),
+      )
+      const fkField = reverse?.field ?? `${parent.name.toLowerCase()}Id`
+      seen.add(key)
+      out.push({ parent, child, fkField })
+    }
+  }
+
+  return out
+}
+
 function registerResource(
-  app: Hono,
   resource: ResourceDefinition,
   store: DataStore,
   spec: ZeroAPISpec,
   authMiddleware?: MiddlewareHandler,
   uploadDir?: string,
   handlers: Record<string, HandlerFn> = {}
-): void {
+): { router: Hono; bundle: ResourceHandlerBundle } {
   const endpoints: CrudAction[] = resource.endpoints ?? DEFAULT_ENDPOINTS
-  const schemas   = generateZodSchemas(resource)
-  const key       = resource.name.toLowerCase()
-  const routePath = `/${toPlural(resource.name)}`
-
-  if (!store.has(key)) store.set(key, new Map())
-  const getStore = (): ResourceStore => store.get(key) as ResourceStore
-
-  const listGuard   = buildGuard(resource, 'list',   spec, authMiddleware)
-  const readGuard   = buildGuard(resource, 'read',   spec, authMiddleware)
-  const createGuard = buildGuard(resource, 'create', spec, authMiddleware)
-  const updateGuard = buildGuard(resource, 'update', spec, authMiddleware)
-  const deleteGuard = buildGuard(resource, 'delete', spec, authMiddleware)
-
-  const hasOwnOnly = resourceHasOwnOnly(spec, resource.name)
-
+  const bundle = buildResourceHandlerBundle(resource, store, spec, authMiddleware, uploadDir, handlers)
   const router = new Hono()
 
   // LIST — filtering, sorting, cursor pagination, includes
   if (endpoints.includes('list')) {
-    mount(router, 'get', '/', listGuard, (c) => {
-      const query = parseQueryParams(new URL(c.req.url))
-      let allItems = Array.from(getStore().values())
-      const ownership = getOwnershipFilter(c)
-      if (ownership) {
-        allItems = allItems.filter((item) => item['userId'] === ownership.userId)
-      }
-      const { data, count, nextCursor } = applyQuery(allItems, query)
-      const enriched = applyIncludes(data, query.include, resource, spec, store)
-      return c.json({ data: enriched, count, ...(nextCursor ? { nextCursor } : {}) })
-    })
+    mount(router, 'get', '/', bundle.guards.list, (c) => bundle.handleList(c))
   }
 
   // CUSTOM ENDPOINTS — registered before /:id to take priority in RegExpRouter
@@ -206,244 +552,85 @@ function registerResource(
     })
   }
 
-  // CREATE — file upload, nested relations, transactions, hooks
+  // CREATE
   if (endpoints.includes('create')) {
-    mount(router, 'post', '/', createGuard, async (c) => {
-      const read = await readBody(c, resource, uploadDir)
-      if (!read.ok) return read.res
-
-      // ownOnly create: the requester owns the new row by construction.
-      // Force userId from the authenticated identity, overriding any client-supplied value.
-      const ownership = getOwnershipFilter(c)
-      if (ownership) {
-        read.data['userId'] = ownership.userId
-      }
-
-      // Extract nested manyToMany data before validation
-      const { body: cleanBody, nested } = extractNestedRelations(read.data, resource)
-
-      // beforeCreate hook — can throw to cancel, can mutate cleanBody
-      if (resource.hooks?.beforeCreate) {
-        try {
-          await executeHook(resource.hooks.beforeCreate, handlers, cleanBody, c, store)
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          return c.json({ error: 'Hook rejected request', details: message }, 400)
-        }
-      }
-
-      // Validate primary fields only
-      const fileFieldKeys = Object.entries(resource.fields)
-        .filter(([, f]) => f.type === 'file')
-        .map(([k]) => k)
-
-      const schemaResult = schemas.create.safeParse(
-        Object.fromEntries(
-          Object.entries(cleanBody).filter(([k]) => !fileFieldKeys.includes(k))
-        )
-      )
-      if (!schemaResult.success) return validationError(c, schemaResult.error.issues)
-
-      // Transaction check
-      const txConfig = resource.transactions?.find((t) => t.trigger === 'POST')
-      if (txConfig) {
-        const txResult = await executeTransaction(txConfig.operations, cleanBody, store)
-        if (!txResult.success) {
-          return c.json(
-            { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
-            409
-          )
-        }
-      }
-
-      // FK fields from manyToOne/oneToOne relations are not in Zod schema — re-attach them
-      const fkFields = (resource.relations ?? [])
-        .filter((r) => r.type === 'manyToOne' || r.type === 'oneToOne')
-        .map((r) => r.field ?? `${r.resource.toLowerCase()}Id`)
-
-      const id  = randomUUID()
-      const now = new Date().toISOString()
-      const item: Record<string, unknown> = {
-        ...schemaResult.data,
-        ...Object.fromEntries(fkFields.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
-        // Re-attach file URLs (already uploaded, not part of Zod schema)
-        ...Object.fromEntries(fileFieldKeys.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
-        // ownOnly: pin userId from the authenticated identity (not part of Zod schema).
-        ...(hasOwnOnly && cleanBody['userId'] != null ? { userId: cleanBody['userId'] } : {}),
-        // Server-managed fields applied last so a client-supplied id/createdAt/updatedAt
-        // in the body cannot desync item.id from the store key.
-        id, createdAt: now, updatedAt: now,
-      }
-      getStore().set(id, item)
-
-      // Persist nested M2M join records atomically — rollback the main record on failure
-      if (nested.length > 0) {
-        try {
-          persistNestedRelations(id, nested, resource, store)
-        } catch (err) {
-          getStore().delete(id)
-          const message = err instanceof Error ? err.message : String(err)
-          return c.json({ error: 'Nested relation failed', details: message }, 409)
-        }
-      }
-
-      // afterCreate hook — fire-and-forget (failure does not roll back)
-      if (resource.hooks?.afterCreate) {
-        try {
-          await executeHook(resource.hooks.afterCreate, handlers, { ...item }, c, store)
-        } catch { /* intentional: after-hooks do not cancel completed operations */ }
-      }
-
-      return c.json({ data: item }, 201)
-    })
+    mount(router, 'post', '/', bundle.guards.create, (c) => bundle.handleCreate(c))
   }
 
-  // READ — with optional ?include=
+  // READ
   if (endpoints.includes('read')) {
-    mount(router, 'get', '/:id', readGuard, (c) => {
-      const id = c.req.param('id') ?? ''
-      const item = getStore().get(id)
-      if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
-
-      // ownOnly: hide non-owned rows behind 404 so existence is not leaked.
-      const ownership = getOwnershipFilter(c)
-      if (ownership && item['userId'] !== ownership.userId) {
-        return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
-      }
-
-      const query = parseQueryParams(new URL(c.req.url))
-      const enriched = query.include.length > 0
-        ? applyIncludes([item], query.include, resource, spec, store)[0] ?? item
-        : item
-
-      return c.json({ data: enriched })
-    })
+    mount(router, 'get', '/:id', bundle.guards.read, (c) => bundle.handleRead(c))
   }
 
-  // UPDATE — file upload, transactions, hooks
+  // UPDATE
   if (endpoints.includes('update')) {
-    mount(router, 'put', '/:id', updateGuard, async (c) => {
-      const id = c.req.param('id') ?? ''
-      const existing = getStore().get(id)
-      if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
-
-      // ownOnly: editing someone else's row reports 404, not 403.
-      const ownership = getOwnershipFilter(c)
-      if (ownership && existing['userId'] !== ownership.userId) {
-        return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
-      }
-
-      const read = await readBody(c, resource, uploadDir)
-      if (!read.ok) return read.res
-
-      const result = schemas.update.safeParse(read.data)
-      if (!result.success) return validationError(c, result.error.issues)
-
-      const updateData: Record<string, unknown> = { ...(result.data as Record<string, unknown>) }
-
-      // beforeUpdate hook — can throw to cancel, can mutate updateData
-      if (resource.hooks?.beforeUpdate) {
-        try {
-          await executeHook(resource.hooks.beforeUpdate, handlers, updateData, c, store)
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          return c.json({ error: 'Hook rejected request', details: message }, 400)
-        }
-      }
-
-      const txConfig = resource.transactions?.find((t) => t.trigger === 'PUT')
-      if (txConfig) {
-        const txResult = await executeTransaction(txConfig.operations, read.data, store)
-        if (!txResult.success) {
-          return c.json(
-            { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
-            409
-          )
-        }
-      }
-
-      const fkFieldsUpd = (resource.relations ?? [])
-        .filter((r) => r.type === 'manyToOne' || r.type === 'oneToOne')
-        .map((r) => r.field ?? `${r.resource.toLowerCase()}Id`)
-
-      const updated: Record<string, unknown> = {
-        ...existing,
-        ...updateData,
-        ...Object.fromEntries(fkFieldsUpd.map((k) => [k, read.data[k]]).filter(([, v]) => v != null)),
-        // Server-managed fields applied last: id is pinned to the route param (the store key)
-        // and updatedAt is set by the server, so a client-supplied value in the body is ignored.
-        id,
-        updatedAt: new Date().toISOString(),
-        // ownOnly: ownership can never be transferred via PUT.
-        ...(hasOwnOnly && existing['userId'] != null ? { userId: existing['userId'] } : {}),
-      }
-      getStore().set(id, updated)
-
-      // afterUpdate hook — fire-and-forget
-      if (resource.hooks?.afterUpdate) {
-        try {
-          await executeHook(resource.hooks.afterUpdate, handlers, { ...updated }, c, store)
-        } catch { /* intentional */ }
-      }
-
-      return c.json({ data: updated })
-    })
+    mount(router, 'put', '/:id', bundle.guards.update, (c) => bundle.handleUpdate(c))
   }
 
-  // DELETE — transactions, hooks
+  // DELETE
   if (endpoints.includes('delete')) {
-    mount(router, 'delete', '/:id', deleteGuard, async (c) => {
-      const id = c.req.param('id') ?? ''
-      const existing = getStore().get(id)
-      if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    mount(router, 'delete', '/:id', bundle.guards.delete, (c) => bundle.handleDelete(c))
+  }
 
-      // ownOnly: deleting someone else's row reports 404, not 403.
-      const ownership = getOwnershipFilter(c)
-      if (ownership && existing['userId'] !== ownership.userId) {
-        return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
-      }
+  return { router, bundle }
+}
 
-      // beforeDelete hook — can throw to cancel
-      if (resource.hooks?.beforeDelete) {
-        try {
-          await executeHook(resource.hooks.beforeDelete, handlers, { id }, c, store)
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          return c.json({ error: 'Hook rejected request', details: message }, 400)
-        }
-      }
+/**
+ * Phase 2.1: mount nested routes `/<parent>/:parentId/<child>[/...]` on the
+ * parent's router. Re-uses the child's handler bundle so RBAC, hooks,
+ * transactions, validation, and includes all behave like the flat endpoints.
+ */
+function registerNestedRoutes(
+  parentRouter: Hono,
+  parent: ResourceDefinition,
+  child: ResourceDefinition,
+  fkField: string,
+  store: DataStore,
+  childBundle: ResourceHandlerBundle,
+): void {
+  const parentKey = parent.name.toLowerCase()
+  const childEndpoints = child.endpoints ?? DEFAULT_ENDPOINTS
+  const basePath = `/:parentId/${toPlural(child.name)}`
 
-      const txConfig = resource.transactions?.find((t) => t.trigger === 'DELETE')
-      if (txConfig) {
-        const txResult = await executeTransaction(txConfig.operations, { id }, store)
-        if (!txResult.success) {
-          return c.json(
-            { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
-            409
-          )
-        }
-      }
+  const requireParent = (c: Context): Response | null => {
+    const parentId = c.req.param('parentId') ?? ''
+    if (!store.get(parentKey)?.has(parentId)) {
+      return c.json({ error: `${parent.name} with id "${parentId}" not found` }, 404)
+    }
+    return null
+  }
 
-      getStore().delete(id)
+  const scope = (c: Context): ParentScope => ({
+    field: fkField,
+    value: c.req.param('parentId') ?? '',
+  })
 
-      // afterDelete hook — fire-and-forget
-      if (resource.hooks?.afterDelete) {
-        try {
-          await executeHook(resource.hooks.afterDelete, handlers, { id }, c, store)
-        } catch { /* intentional */ }
-      }
-
-      return c.json({ data: null })
+  if (childEndpoints.includes('list')) {
+    mount(parentRouter, 'get', basePath, childBundle.guards.list, (c) => {
+      const miss = requireParent(c); if (miss) return miss
+      return childBundle.handleList(c, scope(c))
     })
   }
 
-  app.route(routePath, router)
+  if (childEndpoints.includes('create')) {
+    mount(parentRouter, 'post', basePath, childBundle.guards.create, async (c) => {
+      const miss = requireParent(c); if (miss) return miss
+      return childBundle.handleCreate(c, scope(c))
+    })
+  }
+
+  if (childEndpoints.includes('read')) {
+    mount(parentRouter, 'get', `${basePath}/:id`, childBundle.guards.read, (c) => {
+      const miss = requireParent(c); if (miss) return miss
+      return childBundle.handleRead(c, scope(c))
+    })
+  }
 }
 
 /**
  * Registers all resource routes on the Hono app.
  * Integrates: auth guards, RBAC, query builder, includes, transactions, file uploads,
- * lifecycle hooks, and custom endpoints.
+ * lifecycle hooks, custom endpoints, and (Phase 2.1) nested relation endpoints.
  */
 export function generateRoutes(
   spec: ZeroAPISpec,
@@ -453,7 +640,29 @@ export function generateRoutes(
   uploadDir?: string,
   handlers: Record<string, HandlerFn> = {}
 ): void {
+  // First pass: build flat routes for every resource and remember the bundles
+  // so the second pass can mount nested routes on the parent's router.
+  const built = new Map<string, { router: Hono; bundle: ResourceHandlerBundle }>()
   for (const resource of spec.resources) {
-    registerResource(app, resource, store, spec, authMiddleware, uploadDir, handlers)
+    built.set(
+      resource.name,
+      registerResource(resource, store, spec, authMiddleware, uploadDir, handlers),
+    )
+  }
+
+  // Second pass: nested routes — wired before app.route so they share the
+  // parent's mount path and Hono's regex router treats them as siblings of
+  // the flat /:id route (with longer, more specific patterns winning).
+  for (const { parent, child, fkField } of collectNestedRelations(spec)) {
+    const parentEntry = built.get(parent.name)
+    const childEntry  = built.get(child.name)
+    if (!parentEntry || !childEntry) continue
+    registerNestedRoutes(parentEntry.router, parent, child, fkField, store, childEntry.bundle)
+  }
+
+  for (const resource of spec.resources) {
+    const entry = built.get(resource.name)
+    if (!entry) continue
+    app.route(`/${toPlural(resource.name)}`, entry.router)
   }
 }

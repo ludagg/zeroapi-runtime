@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto'
-import type { ZeroAPISpec, ResourceDefinition, RelationDefinition } from '../types/spec.js'
+import type {
+  ZeroAPISpec, ResourceDefinition, RelationDefinition, SpecRelation,
+} from '../types/spec.js'
 import { toPlural } from '../utils/plural.js'
 import type { DataStore } from '../generators/routes.js'
 
@@ -112,17 +114,165 @@ export function renderJoinModels(
   return models
 }
 
+// ── Top-level → per-resource normalization (Phase 2.1) ────────────────────────
+
+/**
+ * Maps a top-level `onDelete` token (cascade/set-null/restrict) to the
+ * per-resource Prisma form (Cascade/SetNull/Restrict).
+ */
+function mapTopLevelOnDelete(
+  onDelete: SpecRelation['onDelete'],
+): RelationDefinition['onDelete'] | undefined {
+  if (onDelete === 'cascade')  return 'Cascade'
+  if (onDelete === 'set-null') return 'SetNull'
+  if (onDelete === 'restrict') return 'Restrict'
+  return undefined
+}
+
+/**
+ * Returns a shallow copy of the spec where each top-level `relations[]` entry
+ * has been merged into the matching resource's per-resource `relations[]`.
+ * The original `spec.relations` block is preserved unchanged.
+ *
+ * The mapping mirrors how Prisma sees the same shapes:
+ *   many-to-one  A→B  field=fk → A.manyToOne(B, field=fk)
+ *   one-to-many  A→B           → A.oneToMany(B) + B.manyToOne(A, field=`{a}Id`)
+ *   one-to-one   A→B  field=fk → A.oneToOne(B, field=fk)
+ *   many-to-many A→B  through  → A.manyToMany(B, through)
+ *
+ * Duplicates (per-resource entry already covers the same target) are skipped.
+ */
+export function normalizeTopLevelRelations(spec: ZeroAPISpec): ZeroAPISpec {
+  if (!spec.relations || spec.relations.length === 0) return spec
+
+  const resources = spec.resources.map((r) => ({
+    ...r,
+    relations: [...(r.relations ?? [])],
+  }))
+  const byName = new Map(resources.map((r) => [r.name, r]))
+
+  const hasRel = (
+    res: ResourceDefinition,
+    targetName: string,
+    types: RelationDefinition['type'][],
+  ): boolean =>
+    (res.relations ?? []).some((r) => r.resource === targetName && types.includes(r.type))
+
+  for (const sr of spec.relations) {
+    const from = byName.get(sr.from)
+    const to   = byName.get(sr.to)
+    if (!from || !to) continue
+
+    const onDeletePrisma = mapTopLevelOnDelete(sr.onDelete)
+
+    switch (sr.type) {
+      case 'many-to-one': {
+        if (!hasRel(from, sr.to, ['manyToOne'])) {
+          from.relations!.push({
+            type: 'manyToOne',
+            resource: sr.to,
+            field: sr.field,
+            ...(onDeletePrisma ? { onDelete: onDeletePrisma } : {}),
+          })
+        }
+        break
+      }
+      case 'one-to-many': {
+        if (!hasRel(from, sr.to, ['oneToMany'])) {
+          from.relations!.push({ type: 'oneToMany', resource: sr.to })
+        }
+        if (!hasRel(to, sr.from, ['manyToOne'])) {
+          to.relations!.push({
+            type: 'manyToOne',
+            resource: sr.from,
+            field: `${sr.from.toLowerCase()}Id`,
+            ...(onDeletePrisma ? { onDelete: onDeletePrisma } : {}),
+          })
+        }
+        break
+      }
+      case 'one-to-one': {
+        if (!hasRel(from, sr.to, ['oneToOne'])) {
+          from.relations!.push({
+            type: 'oneToOne',
+            resource: sr.to,
+            field: sr.field,
+            ...(onDeletePrisma ? { onDelete: onDeletePrisma } : {}),
+          })
+        }
+        break
+      }
+      case 'many-to-many': {
+        if (!hasRel(from, sr.to, ['manyToMany']) && sr.through) {
+          from.relations!.push({
+            type: 'manyToMany',
+            resource: sr.to,
+            through: sr.through,
+            ...(onDeletePrisma ? { onDelete: onDeletePrisma } : {}),
+          })
+        }
+        break
+      }
+    }
+  }
+
+  return { ...spec, resources }
+}
+
 // ── Runtime include resolver ──────────────────────────────────────────────────
+
+/** Result of validating an `?include=` list against a resource's relations. */
+export interface IncludeValidationResult {
+  ok: boolean
+  unknown?: string
+}
+
+/**
+ * Validates each name in an `?include=` list against the resource's relations.
+ * Returns the first unknown name so callers can return 400 with a clear message.
+ */
+export function validateIncludes(
+  includeList: string[],
+  resource: ResourceDefinition,
+): IncludeValidationResult {
+  if (includeList.length === 0) return { ok: true }
+  const relations = resource.relations ?? []
+  for (const name of includeList) {
+    const matched = relations.some(
+      (r) => r.resource.toLowerCase() === name.toLowerCase(),
+    )
+    if (!matched) return { ok: false, unknown: name }
+  }
+  return { ok: true }
+}
+
+/** True when the named resource has at least one ownOnly permission rule. */
+function resourceHasOwnOnly(spec: ZeroAPISpec, resourceName: string): boolean {
+  return (spec.permissions ?? []).some(
+    (p) => p.resource === resourceName && p.rules.some((r) => r.ownOnly),
+  )
+}
+
+/** Optional ownership context used by `?include=` to drop rows the requester
+ *  cannot see (i.e. ownOnly rules on the included relation). */
+export interface IncludeOwnershipContext {
+  /** Authenticated user id, when the request comes from a JWT identity. */
+  userId?: string
+}
 
 /**
  * Resolves `?include=` relations for a list of items, doing in-memory joins.
+ * When the included resource has an ownOnly permission rule and a userId is
+ * provided, rows the requester does not own are filtered out before they are
+ * attached to the response — preserving the same visibility as a direct list.
  */
 export function applyIncludes(
   items: Row[],
   includeList: string[],
   resource: ResourceDefinition,
   spec: ZeroAPISpec,
-  store: DataStore
+  store: DataStore,
+  ownership?: IncludeOwnershipContext,
 ): Row[] {
   if (includeList.length === 0 || !resource.relations?.length) return items
 
@@ -130,13 +280,28 @@ export function applyIncludes(
     const enriched: Row = { ...item }
 
     for (const includeName of includeList) {
-      // Find matching relation by target resource name (case-insensitive)
       const rel = resource.relations?.find(
-        (r) => r.resource.toLowerCase() === includeName.toLowerCase()
+        (r) => r.resource.toLowerCase() === includeName.toLowerCase(),
       )
       if (!rel) continue
 
-      enriched[includeName.toLowerCase()] = resolveRelation(item, rel, resource, spec, store)
+      let related: unknown = resolveRelation(item, rel, resource, spec, store)
+
+      // ownOnly filtering: when the included resource has an ownOnly rule and we
+      // know the requester's userId, drop rows they do not own. Without an
+      // identity we can't decide — be conservative and return null/empty.
+      if (resourceHasOwnOnly(spec, rel.resource)) {
+        const ownerId = ownership?.userId
+        if (Array.isArray(related)) {
+          related = ownerId
+            ? related.filter((r) => (r as Row)['userId'] === ownerId)
+            : []
+        } else if (related && typeof related === 'object') {
+          if (!ownerId || (related as Row)['userId'] !== ownerId) related = null
+        }
+      }
+
+      enriched[includeName.toLowerCase()] = related
     }
 
     return enriched
