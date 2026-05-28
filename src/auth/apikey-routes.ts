@@ -26,9 +26,12 @@ export function mountApiKeyRoutes(
     const name = typeof body['name'] === 'string' && body['name'].length > 0
       ? body['name']
       : undefined
+    const role = typeof body['role'] === 'string' && body['role'].length > 0
+      ? body['role']
+      : undefined
 
     const { key, keyHash, keyPrefix } = generateApiKey(prefix)
-    const record = await store.create({ keyHash, keyPrefix, name })
+    const record = await store.create({ keyHash, keyPrefix, name, role })
 
     return c.json({
       data: {
@@ -36,6 +39,7 @@ export function mountApiKeyRoutes(
         key,
         keyPrefix: record.keyPrefix,
         name: record.name ?? null,
+        role: record.role,
         createdAt: record.createdAt.toISOString(),
       },
     }, 201)
@@ -48,6 +52,7 @@ export function mountApiKeyRoutes(
         id: r.id,
         keyPrefix: r.keyPrefix,
         name: r.name ?? null,
+        role: r.role,
         revoked: r.revoked,
         lastUsedAt: r.lastUsedAt ? r.lastUsedAt.toISOString() : null,
         createdAt: r.createdAt.toISOString(),

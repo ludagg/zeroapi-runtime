@@ -50,7 +50,12 @@ async function tryApiKey(
   if (a.length !== b.length || !timingSafeEqual(a, b)) return false
 
   apiKeyStore.updateLastUsed(record.id, new Date()).catch(() => { /* best-effort */ })
-  c.set('apiKey', { id: record.id, keyPrefix: record.keyPrefix, name: record.name })
+  c.set('apiKey', {
+    id: record.id,
+    keyPrefix: record.keyPrefix,
+    name: record.name,
+    role: record.role,
+  })
   return true
 }
 

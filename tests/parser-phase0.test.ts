@@ -169,7 +169,10 @@ describe('Phase 0 — Spec schema extensions', () => {
     it('accepts valid permissions referencing existing resources', () => {
       const spec = parseSpec({
         version: '1.0', name: 'api',
-        resources: baseResources,
+        auth: { jwt: { enabled: true } },
+        resources: [
+          { name: 'Post', fields: { title: { type: 'string' as const, required: true } } },
+        ],
         permissions: [
           {
             resource: 'Post',
@@ -328,7 +331,7 @@ describe('Phase 0 — Spec schema extensions', () => {
             resource: 'Post',
             rules: [
               { role: 'admin', actions: ['create', 'read', 'update', 'delete'] },
-              { role: 'user', actions: ['read', 'update'], ownOnly: true },
+              { role: 'user', actions: ['read', 'update'] },
             ],
           },
         ],

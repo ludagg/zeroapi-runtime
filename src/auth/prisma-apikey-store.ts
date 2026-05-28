@@ -11,6 +11,7 @@ export interface PrismaApiKeyRow {
   keyHash: string
   keyPrefix: string
   name: string | null
+  role: string
   revoked: boolean
   lastUsedAt: Date | null
   createdAt: Date
@@ -19,7 +20,7 @@ export interface PrismaApiKeyRow {
 export interface PrismaApiKeyDelegate {
   findUnique(args: { where: { keyHash: string } }): Promise<PrismaApiKeyRow | null>
   findMany(args?: { orderBy?: { createdAt: 'asc' | 'desc' } }): Promise<PrismaApiKeyRow[]>
-  create(args: { data: { keyHash: string; keyPrefix: string; name?: string } }): Promise<PrismaApiKeyRow>
+  create(args: { data: { keyHash: string; keyPrefix: string; name?: string; role?: string } }): Promise<PrismaApiKeyRow>
   update(args: { where: { id: string }; data: { revoked?: boolean; lastUsedAt?: Date } }): Promise<PrismaApiKeyRow>
   count(): Promise<number>
 }
@@ -34,6 +35,7 @@ function toRecord(r: PrismaApiKeyRow): ApiKeyRecord {
     keyHash: r.keyHash,
     keyPrefix: r.keyPrefix,
     name: r.name ?? undefined,
+    role: r.role,
     revoked: r.revoked,
     lastUsedAt: r.lastUsedAt ?? undefined,
     createdAt: r.createdAt,
@@ -59,6 +61,7 @@ export class PrismaApiKeyStore implements ApiKeyStore {
         keyHash: input.keyHash,
         keyPrefix: input.keyPrefix,
         ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.role !== undefined ? { role: input.role } : {}),
       },
     })
     return toRecord(row)

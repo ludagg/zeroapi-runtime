@@ -323,9 +323,20 @@ function validateSpecLevelBlocks(spec: ZeroAPISpec): string | null {
     }
   }
 
+  const jwtEnabled = spec.auth?.jwt?.enabled === true
   for (const perm of spec.permissions ?? []) {
     if (!names.has(perm.resource)) {
       return `Permission rule references unknown resource "${perm.resource}"`
+    }
+    for (const rule of perm.rules) {
+      if (rule.ownOnly) {
+        if (rule.role === 'public') {
+          return `Permission rule on "${perm.resource}" uses ownOnly with role "public" — public requesters have no identity to own rows`
+        }
+        if (!jwtEnabled) {
+          return `Permission rule on "${perm.resource}" uses ownOnly but auth.jwt.enabled is not true — ownOnly requires authenticated users`
+        }
+      }
     }
   }
 
