@@ -89,6 +89,23 @@ datasource db {
     }
   }
 
-  const parts = [header, models, ...joinModels].filter(Boolean)
+  // Phase 1.1: API-key storage model — emitted whenever apikey auth is active
+  const apiKeyAuthEnabled =
+    spec.auth?.strategy === 'apikey' || spec.auth?.apikey?.enabled === true
+  const apiKeyModel = apiKeyAuthEnabled ? renderApiKeyModel() : null
+
+  const parts = [header, models, ...joinModels, apiKeyModel].filter(Boolean)
   return parts.join('\n\n') + '\n'
+}
+
+function renderApiKeyModel(): string {
+  return `model ApiKey {
+  id         String    @id @default(uuid())
+  keyHash    String    @unique
+  keyPrefix  String
+  name       String?
+  revoked    Boolean   @default(false)
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+}`
 }
