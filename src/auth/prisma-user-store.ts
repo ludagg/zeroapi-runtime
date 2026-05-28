@@ -1,4 +1,4 @@
-import type { CreateUserInput, UserRecord, UserStore } from './user-store.js'
+import type { CreateOAuthUserInput, CreateUserInput, UserRecord, UserStore } from './user-store.js'
 
 export interface PrismaUserRow {
   id: string
@@ -66,6 +66,19 @@ export class PrismaUserStore implements UserStore {
         salt: input.salt,
         ...(input.role !== undefined ? { role: input.role } : {}),
         ...(input.emailVerified !== undefined ? { emailVerified: input.emailVerified } : {}),
+      },
+    })
+    return toRecord(row)
+  }
+
+  async createOAuth(input: CreateOAuthUserInput): Promise<UserRecord> {
+    const row = await this.prisma.user.create({
+      data: {
+        email: input.email.toLowerCase(),
+        passwordHash: '',
+        salt: '',
+        role: input.role ?? 'user',
+        emailVerified: input.emailVerified ?? true,
       },
     })
     return toRecord(row)

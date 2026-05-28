@@ -349,6 +349,17 @@ function validateSpecLevelBlocks(spec: ZeroAPISpec): string | null {
     }
   }
 
+  // Phase 1.4: OAuth reuses the JWT token system, so it requires auth.jwt.enabled.
+  const oauthProviders = spec.auth?.oauth?.providers ?? []
+  if (oauthProviders.length > 0 && spec.auth?.jwt?.enabled !== true) {
+    return `auth.oauth is configured but auth.jwt.enabled is not true — OAuth issues JWT tokens and requires the JWT user system`
+  }
+
+  // Phase 1.4: when OAuth is on, "OAuthAccount" is reserved (it backs the link table).
+  if (oauthProviders.length > 0 && names.has('OAuthAccount')) {
+    return `Resource name "OAuthAccount" is reserved when auth.oauth is configured — rename the resource or remove auth.oauth`
+  }
+
   return null
 }
 

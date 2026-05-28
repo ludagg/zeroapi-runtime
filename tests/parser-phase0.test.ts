@@ -39,6 +39,7 @@ describe('Phase 0 — Spec schema extensions', () => {
           enabled: true,
           strategies: ['jwt', 'apikey', 'oauth'],
           jwt: {
+            enabled: true,
             accessTokenTTL: '15m',
             refreshTokenTTL: '7d',
             secretEnv: 'JWT_SECRET',
@@ -53,7 +54,12 @@ describe('Phase 0 — Spec schema extensions', () => {
           emailVerification: true,
           passwordReset: true,
         },
-        resources: baseResources,
+        // "User" / "RefreshToken" are reserved when jwt.enabled is true,
+        // so use neutral resource names for this test.
+        resources: [
+          { name: 'Account', fields: { email: { type: 'email' as const, required: true } } },
+          { name: 'Post', fields: { title: { type: 'string' as const, required: true } } },
+        ],
       })
       expect(spec.auth?.strategies).toEqual(['jwt', 'apikey', 'oauth'])
       expect(spec.auth?.oauth?.providers).toHaveLength(2)

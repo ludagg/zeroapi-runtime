@@ -43,7 +43,7 @@ export { tryAutoLoadPrismaJwtStores } from './auth/jwt-autodetect.js'
 export { mountJwtAuthRoutes } from './auth/jwt-routes.js'
 export type { PasswordHash } from './auth/password.js'
 export type { JwtPayload, JwtSecretLogger } from './auth/jwt.js'
-export type { UserStore, UserRecord, CreateUserInput } from './auth/user-store.js'
+export type { UserStore, UserRecord, CreateUserInput, CreateOAuthUserInput } from './auth/user-store.js'
 export type {
   RefreshTokenStore, RefreshTokenRecord, CreateRefreshTokenInput,
 } from './auth/refresh-token-store.js'
@@ -53,6 +53,30 @@ export type {
 export type {
   PrismaRefreshTokenLikeClient, PrismaRefreshTokenDelegate, PrismaRefreshTokenRow,
 } from './auth/prisma-refresh-token-store.js'
+
+// ── OAuth (Phase 1.4) ─────────────────────────────────────────────────────────
+export { MemoryOAuthAccountStore } from './auth/oauth-account-store.js'
+export { PrismaOAuthAccountStore } from './auth/prisma-oauth-account-store.js'
+export { MemoryOAuthStateStore } from './auth/oauth-state.js'
+export { mountOAuthRoutes, listConfiguredOAuthProviderNames } from './auth/oauth-routes.js'
+export {
+  getOAuthProvider, isProviderImplemented,
+  OAuthNotImplementedError, OAuthProviderError,
+} from './auth/oauth-providers.js'
+export {
+  OAUTH_CALLBACK_BASE_ENV, buildOAuthCallbackUrl, getOAuthCallbackUrls,
+  resolveOAuthBaseUrl, readProviderCredentials,
+} from './auth/oauth-config.js'
+export type {
+  OAuthAccountStore, OAuthAccountRecord, CreateOAuthAccountInput,
+} from './auth/oauth-account-store.js'
+export type {
+  PrismaOAuthAccountLikeClient, PrismaOAuthAccountDelegate, PrismaOAuthAccountRow,
+} from './auth/prisma-oauth-account-store.js'
+export type { OAuthStateStore, OAuthStateRecord } from './auth/oauth-state.js'
+export type { OAuthUserInfo, OAuthProviderDescriptor } from './auth/oauth-providers.js'
+export type { OAuthCallbackUrl, OAuthWarningLogger } from './auth/oauth-config.js'
+export type { MountOAuthRoutesOptions } from './auth/oauth-routes.js'
 
 // ── RBAC ──────────────────────────────────────────────────────────────────────
 export { getEffectiveRoles, extractRoleFromHeader, hasPermission } from './rbac/roles.js'
