@@ -148,6 +148,30 @@ interface ParentScope {
   value: string
 }
 
+/**
+ * Builds the whitelist of field names usable in `?field[op]=val` filters and
+ * `?sort=field`. Anything outside this set yields a 400 "Unknown field".
+ *
+ * Covers:
+ *  - declared resource fields
+ *  - reserved server-managed columns (id/createdAt/updatedAt/deletedAt)
+ *  - FK columns derived from manyToOne / oneToOne relations
+ *  - `userId` (auto-attached by ownOnly RBAC, even when not in `fields`)
+ */
+function buildAllowedFilterFields(resource: ResourceDefinition): Set<string> {
+  const allowed = new Set<string>([
+    'id', 'createdAt', 'updatedAt', 'deletedAt', 'userId',
+    ...Object.keys(resource.fields),
+  ])
+  for (const rel of resource.relations ?? []) {
+    if (rel.type === 'manyToOne' || rel.type === 'oneToOne') {
+      const fk = rel.field ?? `${rel.resource.toLowerCase()}Id`
+      allowed.add(fk)
+    }
+  }
+  return allowed
+}
+
 interface ResourceHandlerBundle {
   guards: {
     list:   MiddlewareHandler | null
@@ -187,8 +211,35 @@ function buildResourceHandlerBundle(
     delete: buildGuard(resource, 'delete', spec, authMiddleware),
   }
 
+  const allowedFilterFields = buildAllowedFilterFields(resource)
+
   const handleList = (c: Context, parent?: ParentScope): Response => {
-    const query = parseQueryParams(new URL(c.req.url))
+    const paginationFeature = spec.features?.pagination
+    const parseOpts: { defaultLimit?: number; maxLimit?: number } = {}
+    if (paginationFeature?.defaultLimit !== undefined) parseOpts.defaultLimit = paginationFeature.defaultLimit
+    if (paginationFeature?.maxLimit !== undefined)     parseOpts.maxLimit     = paginationFeature.maxLimit
+    const query = parseQueryParams(new URL(c.req.url), parseOpts)
+
+    // Phase 2.2: reject unknown operators with a clear 400 instead of silently dropping them.
+    if (query.unknownOperators.length > 0) {
+      const first = query.unknownOperators[0]
+      if (first) {
+        return c.json({ error: `Unknown operator: ${first.operator}` }, 400)
+      }
+    }
+
+    // Phase 2.2: reject filters/sorts on fields that don't exist on the resource.
+    for (const field of Object.keys(query.filters)) {
+      if (!allowedFilterFields.has(field)) {
+        return c.json({ error: `Unknown field: ${field}` }, 400)
+      }
+    }
+    for (const sortSpec of query.sorts) {
+      if (!allowedFilterFields.has(sortSpec.field)) {
+        return c.json({ error: `Unknown field: ${sortSpec.field}` }, 400)
+      }
+    }
+
     const include = validateIncludes(query.include, resource)
     if (!include.ok) {
       return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
@@ -204,10 +255,18 @@ function buildResourceHandlerBundle(
       items = items.filter((item) => item['userId'] === ownership.userId)
     }
 
-    const { data, count, nextCursor } = applyQuery(items, query)
+    const { data, count, nextCursor, pagination } = applyQuery(items, query, {
+      resource,
+      ...(spec.features ? { features: spec.features } : {}),
+    })
     const identity = getRequesterIdentity(c)
     const enriched = applyIncludes(data, query.include, resource, spec, store, { userId: identity.userId })
-    return c.json({ data: enriched, count, ...(nextCursor ? { nextCursor } : {}) })
+    return c.json({
+      data: enriched,
+      count,
+      pagination,
+      ...(nextCursor ? { nextCursor } : {}),
+    })
   }
 
   const handleRead = (c: Context, parent?: ParentScope): Response => {

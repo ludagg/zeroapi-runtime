@@ -99,7 +99,7 @@ export { generateFlyConfig, getFlyDeployButton } from './deploy/external/flyio.j
 
 // ── Query ─────────────────────────────────────────────────────────────────────
 export { parseQueryParams, toPrismaQuery } from './query/builder.js'
-export { applyFilters, applySorts, applyPagination, applyQuery } from './query/apply.js'
+export { applyFilters, applySorts, applyPagination, applyQuery, applySearch } from './query/apply.js'
 
 // ── Relations ─────────────────────────────────────────────────────────────────
 export {
@@ -159,8 +159,8 @@ export type { RuntimeResult, RuntimeOptions } from './runtime/index.js'
 export type { ResourceSchemas } from './generators/validation.js'
 export type { DataStore, ResourceStore } from './types/store.js'
 export type { OpenAPISpec } from './docs/swagger.js'
-export type { ParsedQuery, FilterMap, SortSpec, PaginationSpec } from './query/builder.js'
-export type { QueryResult } from './query/apply.js'
+export type { ParsedQuery, FilterMap, SortSpec, PaginationSpec, ParseQueryOptions } from './query/builder.js'
+export type { QueryResult, PaginationMeta, ApplyQueryOptions } from './query/apply.js'
 export type { TxResult } from './transactions/executor.js'
 export type { UploadResult, UploadError } from './upload/index.js'
 export type { S3Config, PresignedUrlResult } from './upload/providers/s3.js'

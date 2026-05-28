@@ -99,4 +99,131 @@ describe('toPrismaQuery', () => {
     const prisma = toPrismaQuery(q)
     expect(prisma.take).toBe(15)
   })
+
+  it('maps notin to Prisma notIn', () => {
+    const q = parseQueryParams('http://localhost/?status[notin]=draft,archived')
+    const prisma = toPrismaQuery(q)
+    expect((prisma.where['status'] as Record<string, unknown>)['notIn']).toEqual(['draft', 'archived'])
+  })
+
+  it('computes skip from page in offset mode', () => {
+    const q = parseQueryParams('http://localhost/?page=3&limit=10')
+    const prisma = toPrismaQuery(q)
+    expect(prisma.skip).toBe(20)
+    expect(prisma.take).toBe(10)
+  })
+
+  it('skip is 0 when cursor is set (cursor mode wins)', () => {
+    const q = parseQueryParams('http://localhost/?cursor=abc&page=5&limit=10')
+    const prisma = toPrismaQuery(q)
+    expect(prisma.skip).toBe(0)
+    expect(prisma.cursor).toEqual({ id: 'abc' })
+  })
+})
+
+// ── Phase 2.2 additions ──────────────────────────────────────────────────────
+
+describe('Phase 2.2 — operators', () => {
+  it('parses field[notin] as array', () => {
+    const q = parseQueryParams('http://localhost/?status[notin]=draft,deleted')
+    expect(q.filters['status']?.notin).toEqual(['draft', 'deleted'])
+  })
+
+  it('records unknown operators in unknownOperators', () => {
+    const q = parseQueryParams('http://localhost/?status[lol]=foo')
+    expect(q.unknownOperators).toEqual([{ field: 'status', operator: 'lol' }])
+    expect(q.filters['status']).toBeUndefined()
+  })
+
+  it('records multiple unknown operators', () => {
+    const q = parseQueryParams('http://localhost/?a[bogus]=1&b[fake]=2&c[eq]=3')
+    expect(q.unknownOperators).toHaveLength(2)
+    expect(q.filters['c']?.eq).toBe(3)
+  })
+
+  it('unknownOperators is always an array (empty by default)', () => {
+    const q = parseQueryParams('http://localhost/?status=active')
+    expect(q.unknownOperators).toEqual([])
+  })
+})
+
+describe('Phase 2.2 — search (?q=)', () => {
+  it('parses ?q= as search term', () => {
+    const q = parseQueryParams('http://localhost/?q=iphone')
+    expect(q.q).toBe('iphone')
+  })
+
+  it('q is undefined when absent', () => {
+    const q = parseQueryParams('http://localhost/')
+    expect(q.q).toBeUndefined()
+  })
+
+  it('q does not leak into filters', () => {
+    const q = parseQueryParams('http://localhost/?q=iphone&status=active')
+    expect(q.filters['q']).toBeUndefined()
+    expect(q.filters['status']?.eq).toBe('active')
+  })
+})
+
+describe('Phase 2.2 — sort syntax', () => {
+  it('parses -field as descending', () => {
+    const q = parseQueryParams('http://localhost/?sort=-price')
+    expect(q.sorts).toEqual([{ field: 'price', direction: 'desc' }])
+  })
+
+  it('parses -field,otherField (multi)', () => {
+    const q = parseQueryParams('http://localhost/?sort=-createdAt,title')
+    expect(q.sorts).toEqual([
+      { field: 'createdAt', direction: 'desc' },
+      { field: 'title',     direction: 'asc'  },
+    ])
+  })
+
+  it('mixes legacy and prefix syntax', () => {
+    const q = parseQueryParams('http://localhost/?sort=-price,title:desc')
+    expect(q.sorts).toEqual([
+      { field: 'price', direction: 'desc' },
+      { field: 'title', direction: 'desc' },
+    ])
+  })
+})
+
+describe('Phase 2.2 — offset pagination', () => {
+  it('parses ?page= into pagination.page', () => {
+    const q = parseQueryParams('http://localhost/?page=3&limit=10')
+    expect(q.pagination.page).toBe(3)
+    expect(q.pagination.limit).toBe(10)
+  })
+
+  it('page is undefined when absent (cursor mode default)', () => {
+    const q = parseQueryParams('http://localhost/?limit=10')
+    expect(q.pagination.page).toBeUndefined()
+  })
+
+  it('ignores page < 1', () => {
+    const q = parseQueryParams('http://localhost/?page=0')
+    expect(q.pagination.page).toBeUndefined()
+  })
+
+  it('ignores non-numeric page', () => {
+    const q = parseQueryParams('http://localhost/?page=abc')
+    expect(q.pagination.page).toBeUndefined()
+  })
+})
+
+describe('Phase 2.2 — feature-driven pagination defaults', () => {
+  it('uses defaultLimit option when ?limit= is missing', () => {
+    const q = parseQueryParams('http://localhost/', { defaultLimit: 50 })
+    expect(q.pagination.limit).toBe(50)
+  })
+
+  it('caps ?limit= at maxLimit option', () => {
+    const q = parseQueryParams('http://localhost/?limit=9999', { maxLimit: 200 })
+    expect(q.pagination.limit).toBe(200)
+  })
+
+  it('falls back to built-in 20/100 when options are not provided', () => {
+    expect(parseQueryParams('http://localhost/').pagination.limit).toBe(20)
+    expect(parseQueryParams('http://localhost/?limit=9999').pagination.limit).toBe(100)
+  })
 })

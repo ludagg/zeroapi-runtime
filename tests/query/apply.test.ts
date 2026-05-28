@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { applyFilters, applySorts, applyPagination, applyQuery } from '../../src/query/apply.js'
+import { applyFilters, applySorts, applyPagination, applyQuery, applySearch } from '../../src/query/apply.js'
 import { parseQueryParams } from '../../src/query/builder.js'
+import type { ResourceDefinition } from '../../src/types/spec.js'
 
 const items = [
   { id: 'a', title: 'Phone Case', price: 9.99,  status: 'active',  name: 'Alice' },
@@ -124,6 +125,151 @@ describe('applyQuery (combined)', () => {
     const q = parseQueryParams('http://localhost/?price[gte]=300')
     const { count } = applyQuery(items, q)
     expect(count).toBe(2)
+  })
+})
+
+// ── Phase 2.2 ────────────────────────────────────────────────────────────────
+
+describe('Phase 2.2 — notin operator', () => {
+  it('excludes items in the notin set', () => {
+    const result = applyFilters(items, { status: { notin: ['inactive', 'pending'] } })
+    expect(result.map((r) => r['id'])).toEqual(['a', 'b', 'd']) // only active
+  })
+
+  it('combines with eq', () => {
+    const result = applyFilters(items, {
+      status: { eq: 'active' },
+      name:   { notin: ['Alice'] },
+    })
+    expect(result.map((r) => r['id'])).toEqual(['b', 'd'])
+  })
+})
+
+describe('Phase 2.2 — applySearch', () => {
+  const resource: ResourceDefinition = {
+    name: 'Product',
+    fields: { title: { type: 'string' }, body: { type: 'text' }, name: { type: 'string' } },
+    searchable: ['title', 'name'],
+  }
+
+  it('matches case-insensitively across searchable fields (OR)', () => {
+    const result = applySearch(items, 'phone', resource, { search: { enabled: true } })
+    // "Phone Case", "Smart Phone" — both match on title
+    expect(result.map((r) => r['id'])).toEqual(['a', 'b'])
+  })
+
+  it('matches against any searchable field (OR semantics)', () => {
+    const result = applySearch(items, 'carol', resource, { search: { enabled: true } })
+    expect(result).toHaveLength(1)
+    expect(result[0]?.['id']).toBe('c')
+  })
+
+  it('returns all items when q is empty', () => {
+    expect(applySearch(items, '', resource, { search: { enabled: true } })).toHaveLength(5)
+    expect(applySearch(items, undefined, resource, { search: { enabled: true } })).toHaveLength(5)
+  })
+
+  it('does nothing when search.enabled is false', () => {
+    const result = applySearch(items, 'phone', resource, { search: { enabled: false } })
+    expect(result).toHaveLength(5)
+  })
+
+  it('does nothing when features is absent', () => {
+    expect(applySearch(items, 'phone', resource)).toHaveLength(5)
+  })
+
+  it('does nothing when resource has no searchable[]', () => {
+    const noSearch: ResourceDefinition = { name: 'X', fields: { title: { type: 'string' } } }
+    expect(applySearch(items, 'phone', noSearch, { search: { enabled: true } })).toHaveLength(5)
+  })
+
+  it('ignores null/undefined field values', () => {
+    const sparse = [
+      { id: '1', title: null },
+      { id: '2', title: 'phone' },
+      { id: '3' },
+    ]
+    const result = applySearch(sparse, 'phone', resource, { search: { enabled: true } })
+    expect(result).toHaveLength(1)
+    expect(result[0]?.['id']).toBe('2')
+  })
+})
+
+describe('Phase 2.2 — offset pagination & metadata', () => {
+  it('returns the requested page slice when page is set', () => {
+    const q = parseQueryParams('http://localhost/?page=2&limit=2')
+    const { data, pagination } = applyQuery(items, q)
+    expect(data.map((r) => r['id'])).toEqual(['c', 'd'])
+    expect(pagination.page).toBe(2)
+    expect(pagination.limit).toBe(2)
+    expect(pagination.total).toBe(5)
+    expect(pagination.totalPages).toBe(3)
+    expect(pagination.hasNext).toBe(true)
+    expect(pagination.hasPrev).toBe(true)
+  })
+
+  it('hasNext=false on the last page', () => {
+    const q = parseQueryParams('http://localhost/?page=3&limit=2')
+    const { pagination } = applyQuery(items, q)
+    expect(pagination.hasNext).toBe(false)
+    expect(pagination.hasPrev).toBe(true)
+  })
+
+  it('hasPrev=false on page 1', () => {
+    const q = parseQueryParams('http://localhost/?page=1&limit=2')
+    const { pagination } = applyQuery(items, q)
+    expect(pagination.hasPrev).toBe(false)
+    expect(pagination.hasNext).toBe(true)
+  })
+
+  it('totalPages is rounded up', () => {
+    // 5 items, limit 2 → 3 pages
+    const q = parseQueryParams('http://localhost/?page=1&limit=2')
+    const { pagination } = applyQuery(items, q)
+    expect(pagination.totalPages).toBe(3)
+  })
+
+  it('does not emit nextCursor in offset mode', () => {
+    const q = parseQueryParams('http://localhost/?page=1&limit=2')
+    const { nextCursor } = applyQuery(items, q)
+    expect(nextCursor).toBeNull()
+  })
+
+  it('returns empty data when page exceeds totalPages', () => {
+    const q = parseQueryParams('http://localhost/?page=99&limit=2')
+    const { data, pagination } = applyQuery(items, q)
+    expect(data).toEqual([])
+    expect(pagination.totalPages).toBe(3)
+  })
+
+  it('pagination meta is populated in cursor mode too', () => {
+    const q = parseQueryParams('http://localhost/?limit=2')
+    const { pagination, nextCursor } = applyQuery(items, q)
+    expect(pagination.total).toBe(5)
+    expect(pagination.limit).toBe(2)
+    expect(nextCursor).toBeTruthy() // cursor mode preserved
+  })
+})
+
+describe('Phase 2.2 — combined query (filter → search → sort → paginate)', () => {
+  const resource: ResourceDefinition = {
+    name: 'Product',
+    fields: { title: { type: 'string' }, status: { type: 'string' } },
+    searchable: ['title', 'name'],
+  }
+
+  it('applies the full pipeline in order', () => {
+    const q = parseQueryParams(
+      'http://localhost/?status=active&q=phone&sort=-price&page=1&limit=10',
+    )
+    const { data, count, pagination } = applyQuery(items, q, {
+      resource,
+      features: { search: { enabled: true } },
+    })
+    // status=active filters to [a, b, d]; q=phone narrows to [a, b]; sort=-price → [b, a]
+    expect(data.map((r) => r['id'])).toEqual(['b', 'a'])
+    expect(count).toBe(2)
+    expect(pagination.total).toBe(2)
   })
 })
 
