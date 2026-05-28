@@ -115,8 +115,15 @@ export { applyFilters, applySorts, applyPagination, applyQuery, applySearch } fr
 export {
   applyIncludes, renderRelationFields, renderJoinModels,
   validateIncludes, normalizeTopLevelRelations,
+  SYSTEM_RESOURCES, SYSTEM_RESOURCE_SAFE_FIELDS,
+  isSystemResourceName, isSystemResourceActive, projectSystemResource,
+  cascadeSystemResourceDelete,
 } from './relations/index.js'
-export type { IncludeValidationResult, IncludeOwnershipContext } from './relations/index.js'
+export type {
+  IncludeValidationResult, IncludeOwnershipContext,
+  SystemResourceName, SystemResourceResolver, SystemResourceResolvers,
+  CascadeResult,
+} from './relations/index.js'
 
 // ── Transactions ──────────────────────────────────────────────────────────────
 export { executeTransaction } from './transactions/executor.js'

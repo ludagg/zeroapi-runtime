@@ -40,6 +40,12 @@ export interface UserStore {
    * user cannot log in with a password until they explicitly set one.
    */
   createOAuth(input: CreateOAuthUserInput): Promise<UserRecord>
+  /**
+   * Remove the user by id. Returns true when a row was deleted, false when
+   * the id was already gone. Cascade behaviour on user-defined relations is
+   * handled by the runtime's `deleteSystemResource` wrapper.
+   */
+  delete?(id: string): Promise<boolean>
 }
 
 export class MemoryUserStore implements UserStore {
@@ -88,5 +94,13 @@ export class MemoryUserStore implements UserStore {
     this.byId.set(record.id, record)
     this.byEmail.set(record.email, record.id)
     return record
+  }
+
+  async delete(id: string): Promise<boolean> {
+    const row = this.byId.get(id)
+    if (!row) return false
+    this.byId.delete(id)
+    this.byEmail.delete(row.email)
+    return true
   }
 }

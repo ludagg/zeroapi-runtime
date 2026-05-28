@@ -7,6 +7,64 @@ import type { DataStore } from '../generators/routes.js'
 
 type Row = Record<string, unknown>
 
+// ── System resources ──────────────────────────────────────────────────────────
+
+/**
+ * System resources created by the runtime (not declared in spec.resources)
+ * that user-defined resources may still relate to, provided the corresponding
+ * auth feature is active.
+ */
+export const SYSTEM_RESOURCES = ['User', 'RefreshToken', 'OAuthAccount', 'ApiKey'] as const
+export type SystemResourceName = typeof SYSTEM_RESOURCES[number]
+
+/** Public-safe field names for each system resource. Sensitive columns
+ *  (passwordHash, salt, tokenHash, …) are never returned via `?include=`. */
+export const SYSTEM_RESOURCE_SAFE_FIELDS: Record<SystemResourceName, string[]> = {
+  User: ['id', 'email', 'role', 'emailVerified', 'createdAt', 'updatedAt'],
+  RefreshToken: ['id', 'userId', 'expiresAt', 'revoked', 'createdAt'],
+  OAuthAccount: ['id', 'provider', 'providerId', 'userId', 'createdAt'],
+  ApiKey: ['id', 'keyPrefix', 'name', 'role', 'revoked', 'lastUsedAt', 'createdAt'],
+}
+
+/** True when a resource name corresponds to a system resource. */
+export function isSystemResourceName(name: string): name is SystemResourceName {
+  return (SYSTEM_RESOURCES as readonly string[]).includes(name)
+}
+
+/** True when the named system resource is active for the given spec — i.e.
+ *  the auth feature that creates it is enabled. */
+export function isSystemResourceActive(spec: ZeroAPISpec, name: string): boolean {
+  if (name === 'User' || name === 'RefreshToken') return spec.auth?.jwt?.enabled === true
+  if (name === 'OAuthAccount') return (spec.auth?.oauth?.providers?.length ?? 0) > 0
+  if (name === 'ApiKey') {
+    return spec.auth?.strategy === 'apikey' || spec.auth?.apikey?.enabled === true
+  }
+  return false
+}
+
+/** Projects a system-resource row down to the public-safe fields. */
+export function projectSystemResource(name: SystemResourceName, row: Row | null | undefined): Row | null {
+  if (!row) return null
+  const allowed = SYSTEM_RESOURCE_SAFE_FIELDS[name]
+  const out: Row = {}
+  for (const key of allowed) {
+    if (key in row) out[key] = row[key]
+  }
+  return out
+}
+
+/**
+ * Async resolver for a single system-resource record by id.
+ * Returns the safe-projected row, or null when the id is unknown.
+ */
+export type SystemResourceResolver = (id: string) => Promise<Row | null>
+
+/**
+ * Map of system-resource resolvers, keyed by the lowercased relation name
+ * (e.g. `user`). Set up by the runtime when the matching auth feature is on.
+ */
+export type SystemResourceResolvers = Record<string, SystemResourceResolver>
+
 // ── Prisma schema helpers ─────────────────────────────────────────────────────
 
 export function renderRelationFields(
@@ -161,7 +219,10 @@ export function normalizeTopLevelRelations(spec: ZeroAPISpec): ZeroAPISpec {
   for (const sr of spec.relations) {
     const from = byName.get(sr.from)
     const to   = byName.get(sr.to)
-    if (!from || !to) continue
+    // The `to` side may be a system resource (e.g. User when auth.jwt is on),
+    // in which case it isn't present in byName but the relation is still valid.
+    const toIsSystem = !to && isSystemResourceName(sr.to) && isSystemResourceActive(spec, sr.to)
+    if (!from || (!to && !toIsSystem)) continue
 
     const onDeletePrisma = mapTopLevelOnDelete(sr.onDelete)
 
@@ -181,7 +242,7 @@ export function normalizeTopLevelRelations(spec: ZeroAPISpec): ZeroAPISpec {
         if (!hasRel(from, sr.to, ['oneToMany'])) {
           from.relations!.push({ type: 'oneToMany', resource: sr.to })
         }
-        if (!hasRel(to, sr.from, ['manyToOne'])) {
+        if (to && !hasRel(to, sr.from, ['manyToOne'])) {
           to.relations!.push({
             type: 'manyToOne',
             resource: sr.from,
@@ -265,18 +326,25 @@ export interface IncludeOwnershipContext {
  * When the included resource has an ownOnly permission rule and a userId is
  * provided, rows the requester does not own are filtered out before they are
  * attached to the response — preserving the same visibility as a direct list.
+ *
+ * System-resource relations (e.g. `?include=user` when auth.jwt is enabled)
+ * are loaded via the supplied async resolvers and projected down to the
+ * public-safe fields so sensitive columns (passwordHash, salt, …) never
+ * cross the API boundary.
  */
-export function applyIncludes(
+export async function applyIncludes(
   items: Row[],
   includeList: string[],
   resource: ResourceDefinition,
   spec: ZeroAPISpec,
   store: DataStore,
   ownership?: IncludeOwnershipContext,
-): Row[] {
+  systemResolvers?: SystemResourceResolvers,
+): Promise<Row[]> {
   if (includeList.length === 0 || !resource.relations?.length) return items
 
-  return items.map((item) => {
+  const out: Row[] = []
+  for (const item of items) {
     const enriched: Row = { ...item }
 
     for (const includeName of includeList) {
@@ -285,7 +353,12 @@ export function applyIncludes(
       )
       if (!rel) continue
 
-      let related: unknown = resolveRelation(item, rel, resource, spec, store)
+      let related: unknown
+      if (isSystemResourceName(rel.resource) && isSystemResourceActive(spec, rel.resource)) {
+        related = await resolveSystemRelation(item, rel, systemResolvers)
+      } else {
+        related = resolveRelation(item, rel, resource, spec, store)
+      }
 
       // ownOnly filtering: when the included resource has an ownOnly rule and we
       // know the requester's userId, drop rows they do not own. Without an
@@ -304,8 +377,29 @@ export function applyIncludes(
       enriched[includeName.toLowerCase()] = related
     }
 
-    return enriched
-  })
+    out.push(enriched)
+  }
+  return out
+}
+
+async function resolveSystemRelation(
+  item: Row,
+  rel: RelationDefinition,
+  resolvers?: SystemResourceResolvers,
+): Promise<unknown> {
+  // Only manyToOne / oneToOne (the user-defined resource owns the FK) is supported
+  // for system targets — user-defined resources do not back-reference into the
+  // system tables via a routes-level `?include`.
+  if (rel.type !== 'manyToOne' && rel.type !== 'oneToOne') return null
+  const targetKey = rel.resource.toLowerCase()
+  const resolver = resolvers?.[targetKey]
+  if (!resolver) return null
+  const fk = rel.field ?? `${targetKey}Id`
+  const fkValue = item[fk] as string | undefined
+  if (!fkValue) return null
+  const row = await resolver(fkValue)
+  if (!row) return null
+  return projectSystemResource(rel.resource as SystemResourceName, row)
 }
 
 function resolveRelation(
@@ -430,6 +524,93 @@ export function persistNestedRelations(
       joinStore.set(`${parentId}:${relatedId}`, joinRecord)
     }
   }
+}
+
+// ── System-resource cascade ───────────────────────────────────────────────────
+
+/** Outcome of a system-resource cascade. Lists ids touched on each user-defined
+ *  resource so callers can audit / verify the operation. */
+export interface CascadeResult {
+  deleted: Record<string, string[]>
+  setNull: Record<string, string[]>
+  restricted: Array<{ resource: string; count: number }>
+}
+
+/**
+ * Applies cascade semantics to the in-memory `DataStore` when a system
+ * resource (e.g. a User) is deleted. Walks every user-defined resource that
+ * has a `manyToOne` / `oneToOne` relation back to `systemResource` and
+ * enforces the relation's `onDelete` policy:
+ *
+ *   · Cascade  → child rows are deleted
+ *   · SetNull  → child FK is cleared (the row stays)
+ *   · Restrict → throws when any child row references the system row
+ *
+ * Returns a summary so tests + audit logs can verify behaviour. Throws on the
+ * first Restrict violation; nothing is mutated in that case.
+ */
+export function cascadeSystemResourceDelete(
+  spec: ZeroAPISpec,
+  store: DataStore,
+  systemResource: string,
+  id: string,
+): CascadeResult {
+  const result: CascadeResult = { deleted: {}, setNull: {}, restricted: [] }
+
+  // First pass: Restrict — bail before mutating anything
+  for (const resource of spec.resources) {
+    for (const rel of resource.relations ?? []) {
+      if (rel.resource !== systemResource) continue
+      if (rel.type !== 'manyToOne' && rel.type !== 'oneToOne') continue
+      if (rel.onDelete !== 'Restrict') continue
+      const fk = rel.field ?? `${systemResource.toLowerCase()}Id`
+      const key = resource.name.toLowerCase()
+      const matches = Array.from(store.get(key)?.values() ?? []).filter(
+        (row) => row[fk] === id,
+      )
+      if (matches.length > 0) {
+        result.restricted.push({ resource: resource.name, count: matches.length })
+        throw new Error(
+          `Cannot delete ${systemResource} "${id}" — ${matches.length} ${resource.name} row(s) still reference it (onDelete: Restrict)`,
+        )
+      }
+    }
+  }
+
+  // Second pass: Cascade + SetNull
+  for (const resource of spec.resources) {
+    for (const rel of resource.relations ?? []) {
+      if (rel.resource !== systemResource) continue
+      if (rel.type !== 'manyToOne' && rel.type !== 'oneToOne') continue
+      const fk = rel.field ?? `${systemResource.toLowerCase()}Id`
+      const key = resource.name.toLowerCase()
+      const bucket = store.get(key)
+      if (!bucket) continue
+
+      const matchedIds: string[] = []
+      for (const [rowId, row] of bucket.entries()) {
+        if (row[fk] !== id) continue
+        matchedIds.push(rowId)
+      }
+
+      if (rel.onDelete === 'Cascade') {
+        for (const rowId of matchedIds) bucket.delete(rowId)
+        if (matchedIds.length > 0) result.deleted[resource.name] = matchedIds
+      } else if (rel.onDelete === 'SetNull') {
+        for (const rowId of matchedIds) {
+          const row = bucket.get(rowId)
+          if (row) {
+            row[fk] = null
+            row['updatedAt'] = new Date().toISOString()
+          }
+        }
+        if (matchedIds.length > 0) result.setNull[resource.name] = matchedIds
+      }
+      // NoAction (or unset) → leave the FK pointing at a now-missing row
+    }
+  }
+
+  return result
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

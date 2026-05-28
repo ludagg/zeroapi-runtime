@@ -45,6 +45,14 @@ function renderModel(
 
   // FK fields owned by relations — must not be re-declared from spec fields
   const relationFkFields = new Set<string>()
+  // Explicit relation to the system User (manyToOne/oneToOne) takes precedence
+  // over the implicit ownOnly userId injection — the explicit relation already
+  // emits `userId String` + `user User @relation(...)`.
+  const hasExplicitUserRelation = (resource.relations ?? []).some(
+    (rel) =>
+      rel.resource === 'User' &&
+      (rel.type === 'manyToOne' || rel.type === 'oneToOne'),
+  )
   for (const rel of resource.relations ?? []) {
     if (rel.type === 'manyToOne' || rel.type === 'oneToOne') {
       relationFkFields.add(rel.field ?? `${rel.resource.toLowerCase()}Id`)
@@ -63,7 +71,7 @@ function renderModel(
       .map(([name, field]) => renderField(name, field)),
   ]
 
-  if (ownedByUser) {
+  if (ownedByUser && !hasExplicitUserRelation) {
     baseFields.push(`  userId        String`)
     baseFields.push(`  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)`)
   }
@@ -120,10 +128,15 @@ datasource db {
   // Phase 1.2: JWT user system — emit User + RefreshToken when opted in.
   // Phase 1.3: extend User with back-relations for each ownOnly-owned resource.
   // Phase 1.4: extend User with `oauthAccounts` back-relation when OAuth is configured.
+  // Phase 2.2: extend User with back-relations for any user-defined resource
+  // that declares an explicit manyToOne / oneToOne to "User".
   const jwtUserSystemEnabled = spec.auth?.jwt?.enabled === true
   const oauthEnabled = (spec.auth?.oauth?.providers?.length ?? 0) > 0
+  const userBackRelations = jwtUserSystemEnabled
+    ? collectUserBackRelations(resources, ownedResources.map((r) => r.name))
+    : []
   const jwtUserModels = jwtUserSystemEnabled
-    ? renderJwtUserModels(ownedResources.map((r) => r.name), oauthEnabled)
+    ? renderJwtUserModels(userBackRelations, oauthEnabled)
     : []
   const oauthModel = oauthEnabled ? renderOAuthAccountModel() : null
 
@@ -152,16 +165,58 @@ function renderApiKeyModel(): string {
 }`
 }
 
-function renderJwtUserModels(ownedResourceNames: string[], includeOAuth: boolean): string[] {
+/** Back-reference line to emit on the User model. `field` is the plural
+ *  lowercased model name (e.g. "orders"), `model` is the target model. */
+interface UserBackRelation {
+  field: string
+  model: string
+}
+
+/**
+ * Collects the back-relations to emit on the User model:
+ *   · `owned<Name>s` for resources owned via the ownOnly RBAC injection
+ *   · `<name>s` (lowercased plural) for resources that declare an explicit
+ *     manyToOne / oneToOne to "User" in their `relations[]`
+ *
+ * The two sources are de-duplicated by target model so a resource that is
+ * both ownOnly AND explicitly related to User contributes a single field
+ * (preferring the explicit relation's plural name).
+ */
+function collectUserBackRelations(
+  resources: ResourceDefinition[],
+  ownedResourceNames: string[],
+): UserBackRelation[] {
+  const byModel = new Map<string, UserBackRelation>()
+
+  for (const resource of resources) {
+    const hasExplicitUserRel = (resource.relations ?? []).some(
+      (rel) =>
+        rel.resource === 'User' &&
+        (rel.type === 'manyToOne' || rel.type === 'oneToOne'),
+    )
+    if (!hasExplicitUserRel) continue
+    const modelName = resource.name.charAt(0).toUpperCase() + resource.name.slice(1)
+    const field = `${resource.name.toLowerCase()}s`
+    byModel.set(modelName, { field, model: modelName })
+  }
+
+  for (const name of ownedResourceNames) {
+    const modelName = name.charAt(0).toUpperCase() + name.slice(1)
+    if (byModel.has(modelName)) continue
+    byModel.set(modelName, { field: `owned${modelName}s`, model: modelName })
+  }
+
+  return [...byModel.values()]
+}
+
+function renderJwtUserModels(backRelations: UserBackRelation[], includeOAuth: boolean): string[] {
   const extraLines: string[] = []
   if (includeOAuth) {
     extraLines.push(`  oauthAccounts OAuthAccount[]`)
   }
-  for (const name of ownedResourceNames) {
-    const modelName = name.charAt(0).toUpperCase() + name.slice(1)
-    // Field name is the lower-cased plural model name to avoid collisions with refreshTokens.
-    const field = `owned${modelName}s`
-    extraLines.push(`  ${field.padEnd(13)} ${modelName}[]`)
+  for (const back of backRelations) {
+    // Pad to 13 chars to align with the other User columns.
+    extraLines.push(`  ${back.field.padEnd(13)} ${back.model}[]`)
   }
 
   const userModel = `model User {

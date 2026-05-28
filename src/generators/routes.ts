@@ -18,6 +18,7 @@ import { parseQueryParams } from '../query/builder.js'
 import { applyQuery } from '../query/apply.js'
 import {
   applyIncludes, extractNestedRelations, persistNestedRelations, validateIncludes,
+  type SystemResourceResolvers,
 } from '../relations/index.js'
 import { executeTransaction } from '../transactions/executor.js'
 import { processFileFields } from '../upload/index.js'
@@ -199,6 +200,7 @@ function buildResourceHandlerBundle(
   uploadDir?: string,
   handlers: Record<string, HandlerFn> = {},
   emitWebhook?: EmitWebhookFn,
+  systemResolvers?: SystemResourceResolvers,
 ): ResourceHandlerBundle {
   const key = resource.name.toLowerCase()
   const lowerName = key
@@ -218,7 +220,7 @@ function buildResourceHandlerBundle(
 
   const allowedFilterFields = buildAllowedFilterFields(resource)
 
-  const handleList = (c: Context, parent?: ParentScope): Response => {
+  const handleList = async (c: Context, parent?: ParentScope): Promise<Response> => {
     const paginationFeature = spec.features?.pagination
     const parseOpts: { defaultLimit?: number; maxLimit?: number } = {}
     if (paginationFeature?.defaultLimit !== undefined) parseOpts.defaultLimit = paginationFeature.defaultLimit
@@ -265,7 +267,11 @@ function buildResourceHandlerBundle(
       ...(spec.features ? { features: spec.features } : {}),
     })
     const identity = getRequesterIdentity(c)
-    const enriched = applyIncludes(data, query.include, resource, spec, store, { userId: identity.userId })
+    const enriched = await applyIncludes(
+      data, query.include, resource, spec, store,
+      { userId: identity.userId },
+      systemResolvers,
+    )
     return c.json({
       data: enriched,
       count,
@@ -274,7 +280,7 @@ function buildResourceHandlerBundle(
     })
   }
 
-  const handleRead = (c: Context, parent?: ParentScope): Response => {
+  const handleRead = async (c: Context, parent?: ParentScope): Promise<Response> => {
     const id = c.req.param('id') ?? ''
     const item = getStore().get(id)
     if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
@@ -297,9 +303,15 @@ function buildResourceHandlerBundle(
     }
 
     const identity = getRequesterIdentity(c)
-    const enriched = query.include.length > 0
-      ? applyIncludes([item], query.include, resource, spec, store, { userId: identity.userId })[0] ?? item
-      : item
+    let enriched: Record<string, unknown> = item
+    if (query.include.length > 0) {
+      const results = await applyIncludes(
+        [item], query.include, resource, spec, store,
+        { userId: identity.userId },
+        systemResolvers,
+      )
+      enriched = results[0] ?? item
+    }
 
     return c.json({ data: enriched })
   }
@@ -588,9 +600,12 @@ function registerResource(
   uploadDir?: string,
   handlers: Record<string, HandlerFn> = {},
   emitWebhook?: EmitWebhookFn,
+  systemResolvers?: SystemResourceResolvers,
 ): { router: Hono; bundle: ResourceHandlerBundle } {
   const endpoints: CrudAction[] = resource.endpoints ?? DEFAULT_ENDPOINTS
-  const bundle = buildResourceHandlerBundle(resource, store, spec, authMiddleware, uploadDir, handlers, emitWebhook)
+  const bundle = buildResourceHandlerBundle(
+    resource, store, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers,
+  )
   const router = new Hono()
 
   // LIST — filtering, sorting, cursor pagination, includes
@@ -712,6 +727,7 @@ export function generateRoutes(
   uploadDir?: string,
   handlers: Record<string, HandlerFn> = {},
   emitWebhook?: EmitWebhookFn,
+  systemResolvers?: SystemResourceResolvers,
 ): void {
   // First pass: build flat routes for every resource and remember the bundles
   // so the second pass can mount nested routes on the parent's router.
@@ -719,13 +735,15 @@ export function generateRoutes(
   for (const resource of spec.resources) {
     built.set(
       resource.name,
-      registerResource(resource, store, spec, authMiddleware, uploadDir, handlers, emitWebhook),
+      registerResource(resource, store, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers),
     )
   }
 
   // Second pass: nested routes — wired before app.route so they share the
   // parent's mount path and Hono's regex router treats them as siblings of
   // the flat /:id route (with longer, more specific patterns winning).
+  // System resources (e.g. User when auth.jwt is on) are never in spec.resources,
+  // so collectNestedRelations naturally skips them via its `spec.resources.find`.
   for (const { parent, child, fkField } of collectNestedRelations(spec)) {
     const parentEntry = built.get(parent.name)
     const childEntry  = built.get(child.name)

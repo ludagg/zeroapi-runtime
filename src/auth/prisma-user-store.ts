@@ -22,6 +22,7 @@ export interface PrismaUserDelegate {
       emailVerified?: boolean
     }
   }): Promise<PrismaUserRow>
+  delete?(args: { where: { id: string } }): Promise<PrismaUserRow>
 }
 
 export interface PrismaUserLikeClient {
@@ -82,5 +83,17 @@ export class PrismaUserStore implements UserStore {
       },
     })
     return toRecord(row)
+  }
+
+  async delete(id: string): Promise<boolean> {
+    if (!this.prisma.user.delete) return false
+    try {
+      await this.prisma.user.delete({ where: { id } })
+      return true
+    } catch {
+      // Prisma's P2025 "record not found" — surface as a no-op the same way
+      // the in-memory store does, so callers don't have to special-case it.
+      return false
+    }
   }
 }
