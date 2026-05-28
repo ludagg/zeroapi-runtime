@@ -188,7 +188,7 @@ The runtime uses an in-memory `Map`-based store. All data is lost on process res
 
 ### 5. File upload: local provider saves to disk
 
-The `local` storage provider writes files to `uploadDir` on the server filesystem and returns a `/uploads/<filename>` URL. You must serve that directory statically yourself (e.g. `app.use('/uploads', serveStatic({ root: uploadDir }))` with Hono's static middleware). The `s3`/`r2` providers return a presigned PUT URL — the client is responsible for the actual upload to the bucket.
+The `local` storage provider writes files to `uploadDir` on the server filesystem and returns a `/uploads/<filename>` URL. When `features.fileUpload` is enabled the runtime mounts `GET /uploads/:key` automatically, so files are served without extra wiring. The `s3`/`r2` providers require `@aws-sdk/client-s3` (optional peer dependency) and read `S3_BUCKET` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` (plus optional `S3_ENDPOINT`, `S3_REGION`, `S3_PUBLIC_URL`). Running `provider: 'local'` with `NODE_ENV=production` emits a loud warning at boot — on ephemeral containers, uploaded files are lost on restart.
 
 ### 6. Auth flows use in-memory user store
 

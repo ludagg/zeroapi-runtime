@@ -116,6 +116,21 @@ export { uploadFile, validateFile, parseMaxSize, processFileFields } from './upl
 export { uploadLocal } from './upload/providers/local.js'
 export { generatePresignedPutUrl } from './upload/providers/s3.js'
 
+// ── Storage (Phase 3.2) ───────────────────────────────────────────────────────
+export {
+  LocalStorage, S3Storage,
+  resolveStorageProvider, LOCAL_IN_PROD_WARNING,
+  mountUploadRoutes, mountLocalUploadRoute,
+  readS3ConfigFromEnv, hasS3EnvConfig, loadS3Module,
+  S3_ENDPOINT_ENV, S3_BUCKET_ENV, S3_ACCESS_KEY_ID_ENV,
+  S3_SECRET_ACCESS_KEY_ENV, S3_REGION_ENV, S3_PUBLIC_URL_ENV,
+} from './storage/index.js'
+export type {
+  StorageProvider, UploadInput, UploadOutput,
+  LocalStorageOptions, S3StorageConfig, S3Module,
+  ResolveStorageOptions, StorageBootLogger, UploadRoutesOptions,
+} from './storage/index.js'
+
 // ── Hooks (Chantier 1) ────────────────────────────────────────────────────────
 export { executeHook } from './hooks/runner.js'
 export type { HandlerContext, HandlerFn } from './hooks/types.js'

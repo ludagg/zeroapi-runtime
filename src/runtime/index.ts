@@ -38,6 +38,10 @@ import { mountScalarDocs } from '../docs/scalar.js'
 import { createRequestIdMiddleware } from '../observability/requestId.js'
 import { assertEnv } from '../env/validate.js'
 import { validateAndGenerateEnv, getConfigCheck, type EnvBootLogger } from '../env/boot.js'
+import {
+  resolveStorageProvider, mountUploadRoutes, mountLocalUploadRoute,
+  LocalStorage, type StorageProvider, type StorageBootLogger,
+} from '../storage/index.js'
 
 export interface RuntimeOptions {
   enableLogging?: boolean
@@ -89,6 +93,14 @@ export interface RuntimeOptions {
   oauthFetch?: typeof fetch
   /** Phase 3.1: receives warnings about missing / auto-generated env vars. Defaults to `console.warn`. */
   envBootLogger?: EnvBootLogger
+  /**
+   * Phase 3.2: explicit storage provider for `features.fileUpload`. Takes
+   * precedence over the auto-resolution that reads `spec.features.fileUpload`
+   * + S3 env vars.
+   */
+  storageProvider?: StorageProvider
+  /** Phase 3.2: receives storage boot warnings (e.g. local+prod). Defaults to `console.warn`. */
+  storageBootLogger?: StorageBootLogger
 }
 
 export interface RuntimeResult {
@@ -148,6 +160,8 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     oauthWarningLogger,
     oauthFetch,
     envBootLogger,
+    storageProvider: providedStorageProvider,
+    storageBootLogger,
   } = options
 
   // Chantier 4: Fail fast on missing env vars (legacy spec.requiredEnv)
@@ -248,6 +262,23 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
       oauthAccountStore, oauthStateStore,
       { ...(baseUrl !== undefined ? { baseUrl } : {}), ...(oauthFetch ? { fetchImpl: oauthFetch } : {}) },
     )
+  }
+
+  // Phase 3.2: Storage provider + upload endpoints. Only when the
+  // `features.fileUpload` block is enabled. When `local` is resolved we also
+  // mount `GET /uploads/:key` so files are served directly by the runtime.
+  const fileUploadFeature = spec.features?.fileUpload
+  if (fileUploadFeature?.enabled) {
+    const storage = providedStorageProvider ?? resolveStorageProvider(fileUploadFeature, {
+      local: { uploadDir },
+      ...(storageBootLogger ? { log: storageBootLogger } : {}),
+    })
+    mountUploadRoutes(app, storage, fileUploadFeature, {
+      ...(authMiddleware ? { authMiddleware } : {}),
+    })
+    if (storage instanceof LocalStorage) {
+      mountLocalUploadRoute(app, storage)
+    }
   }
 
   // Chantier 1: Routes with hooks + custom endpoints
