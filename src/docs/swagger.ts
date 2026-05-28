@@ -79,6 +79,10 @@ function fieldToJsonSchema(field: FieldDefinition): JSONSchema {
 
 // ── Schema builders ───────────────────────────────────────────────────────────
 
+// Server-managed fields: omitted from create/update request bodies because they
+// are auto-generated on create and re-issued on update.
+const RESERVED_FIELDS = new Set(['id', 'createdAt', 'updatedAt'])
+
 function buildFullSchema(resource: ResourceDefinition): JSONSchema {
   const props: Record<string, JSONSchema> = {
     id:        { type: 'string', format: 'uuid', readOnly: true },
@@ -86,6 +90,7 @@ function buildFullSchema(resource: ResourceDefinition): JSONSchema {
     updatedAt: { type: 'string', format: 'date-time', readOnly: true },
   }
   for (const [name, field] of Object.entries(resource.fields)) {
+    if (RESERVED_FIELDS.has(name)) continue
     props[name] = fieldToJsonSchema(field)
   }
   return {
@@ -100,6 +105,7 @@ function buildCreateSchema(resource: ResourceDefinition): JSONSchema {
   const props: Record<string, JSONSchema> = {}
   const required: string[] = []
   for (const [name, field] of Object.entries(resource.fields)) {
+    if (RESERVED_FIELDS.has(name)) continue
     props[name] = fieldToJsonSchema(field)
     if (field.required) required.push(name)
   }
@@ -109,6 +115,7 @@ function buildCreateSchema(resource: ResourceDefinition): JSONSchema {
 function buildUpdateSchema(resource: ResourceDefinition): JSONSchema {
   const props: Record<string, JSONSchema> = {}
   for (const [name, field] of Object.entries(resource.fields)) {
+    if (RESERVED_FIELDS.has(name)) continue
     props[name] = fieldToJsonSchema(field)
   }
   return { type: 'object', properties: props }

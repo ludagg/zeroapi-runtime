@@ -189,6 +189,40 @@ describe('Generated routes — id integrity', () => {
   })
 })
 
+describe('Generated routes — reserved fields auto-generated', () => {
+  it('POST succeeds without client-supplied id/createdAt/updatedAt even when spec marks them required', async () => {
+    const spec: ZeroAPISpec = {
+      version: '1.0.0',
+      name: 'reserved-api',
+      resources: [
+        {
+          name: 'Resource',
+          fields: {
+            id: { type: 'uuid', required: true },
+            createdAt: { type: 'datetime', required: true },
+            updatedAt: { type: 'datetime', required: true },
+            label: { type: 'string', required: true },
+          },
+        },
+      ],
+    }
+    const { app: reservedApp } = createRuntime(spec, { enableLogging: false })
+
+    const res = await reservedApp.request('/resources', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: 'auto' }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json() as { data: { id: string; createdAt: string; updatedAt: string; label: string } }
+    expect(typeof body.data.id).toBe('string')
+    expect(body.data.id.length).toBeGreaterThan(0)
+    expect(typeof body.data.createdAt).toBe('string')
+    expect(typeof body.data.updatedAt).toBe('string')
+    expect(body.data.label).toBe('auto')
+  })
+})
+
 describe('Generated routes — endpoint restriction', () => {
   it('only exposes configured endpoints when endpoints array is provided', async () => {
     const restrictedSpec: ZeroAPISpec = {

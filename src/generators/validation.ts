@@ -57,6 +57,10 @@ export interface ResourceSchemas {
   update: z.ZodObject<z.ZodRawShape>
 }
 
+// Server-managed fields: never validated against client input because they are
+// auto-generated on create (id, createdAt, updatedAt) and re-issued on update.
+const RESERVED_FIELDS = new Set(['id', 'createdAt', 'updatedAt'])
+
 /**
  * Generates runtime Zod validation schemas for a resource.
  * The create schema mirrors field requirements; the update schema makes all fields optional.
@@ -66,6 +70,7 @@ export function generateZodSchemas(resource: ResourceDefinition): ResourceSchema
   const updateShape: z.ZodRawShape = {}
 
   for (const [name, field] of Object.entries(resource.fields)) {
+    if (RESERVED_FIELDS.has(name)) continue
     createShape[name] = fieldToZod(field)
     updateShape[name] = fieldToZod({ ...field, required: false })
   }
