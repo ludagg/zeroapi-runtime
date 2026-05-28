@@ -92,6 +92,14 @@ export type { RequesterIdentity, OwnershipFilter } from './rbac/resource-permiss
 export { generateOpenAPISpec } from './docs/swagger.js'
 export { renderScalarPage, mountScalarDocs } from './docs/scalar.js'
 export { generateReadme } from './docs/readme.js'
+export { generatePostmanCollection, POSTMAN_SCHEMA_V2_1 } from './docs/postman.js'
+export type {
+  PostmanCollection, PostmanInfo, PostmanVariable, PostmanAuth, PostmanAuthEntry,
+  PostmanItem, PostmanFolderItem, PostmanRequestItem, PostmanRequestNode,
+  PostmanUrl, PostmanUrlVariable, PostmanQueryParam, PostmanHeader,
+  PostmanBody, PostmanRawBody, PostmanFormDataBody, PostmanFormDataEntry,
+  PostmanEvent, PostmanScript,
+} from './docs/postman.js'
 
 // ── Deploy ────────────────────────────────────────────────────────────────────
 export { generateRailwayConfig, getRailwayDeployButton } from './deploy/external/railway.js'
