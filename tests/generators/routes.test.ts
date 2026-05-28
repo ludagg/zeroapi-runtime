@@ -111,6 +111,84 @@ describe('Generated routes — /health endpoint', () => {
   })
 })
 
+describe('Generated routes — id integrity', () => {
+  it('client-supplied id in body must not desync item.id from the store key', async () => {
+    const spec: ZeroAPISpec = {
+      version: '1.0.0',
+      name: 'contacts-api',
+      resources: [
+        {
+          name: 'Contact',
+          fields: {
+            id: { type: 'uuid', required: false },
+            nom: { type: 'string', required: true },
+          },
+        },
+      ],
+    }
+    const { app: contactsApp } = createRuntime(spec, { enableLogging: false })
+
+    const clientId = '256399b1-639a-4f49-9e54-efb8fa08ffa5'
+    const createRes = await contactsApp.request('/contacts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: clientId, nom: 'ludo' }),
+    })
+    expect(createRes.status).toBe(201)
+    const created = await createRes.json() as { data: { id: string; nom: string } }
+
+    const listRes = await contactsApp.request('/contacts')
+    const list = await listRes.json() as { data: Array<{ id: string }> }
+    expect(list.data).toHaveLength(1)
+    const listedId = list.data[0]!.id
+
+    const readRes = await contactsApp.request(`/contacts/${listedId}`)
+    expect(readRes.status).toBe(200)
+    const read = await readRes.json() as { data: { id: string; nom: string } }
+    expect(read.data.id).toBe(listedId)
+    expect(read.data.nom).toBe('ludo')
+    expect(created.data.id).toBe(listedId)
+  })
+
+  it('client-supplied id in PUT body must not desync item.id from the store key', async () => {
+    const spec: ZeroAPISpec = {
+      version: '1.0.0',
+      name: 'contacts-api',
+      resources: [
+        {
+          name: 'Contact',
+          fields: {
+            id: { type: 'uuid', required: false },
+            nom: { type: 'string', required: true },
+          },
+        },
+      ],
+    }
+    const { app: contactsApp } = createRuntime(spec, { enableLogging: false })
+
+    const createRes = await contactsApp.request('/contacts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nom: 'ludo' }),
+    })
+    const created = await createRes.json() as { data: { id: string } }
+    const realId = created.data.id
+
+    const putRes = await contactsApp.request(`/contacts/${realId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'cafef00d-0000-0000-0000-000000000000', nom: 'updated' }),
+    })
+    expect(putRes.status).toBe(200)
+
+    const readRes = await contactsApp.request(`/contacts/${realId}`)
+    expect(readRes.status).toBe(200)
+    const read = await readRes.json() as { data: { id: string; nom: string } }
+    expect(read.data.id).toBe(realId)
+    expect(read.data.nom).toBe('updated')
+  })
+})
+
 describe('Generated routes — endpoint restriction', () => {
   it('only exposes configured endpoints when endpoints array is provided', async () => {
     const restrictedSpec: ZeroAPISpec = {
