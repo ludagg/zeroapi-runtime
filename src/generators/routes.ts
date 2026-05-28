@@ -26,6 +26,9 @@ import { executeHook } from '../hooks/runner.js'
 
 export type { DataStore, ResourceStore }
 
+/** Phase 3.3: callback invoked after a successful create/update/delete. */
+export type EmitWebhookFn = (eventType: string, payload: unknown) => void
+
 const DEFAULT_ENDPOINTS: CrudAction[] = ['list', 'create', 'read', 'update', 'delete']
 
 function composeGuard(guards: MiddlewareHandler[]): MiddlewareHandler | null {
@@ -195,8 +198,10 @@ function buildResourceHandlerBundle(
   authMiddleware?: MiddlewareHandler,
   uploadDir?: string,
   handlers: Record<string, HandlerFn> = {},
+  emitWebhook?: EmitWebhookFn,
 ): ResourceHandlerBundle {
   const key = resource.name.toLowerCase()
+  const lowerName = key
   if (!store.has(key)) store.set(key, new Map())
   const getStore = (): ResourceStore => store.get(key) as ResourceStore
 
@@ -394,6 +399,9 @@ function buildResourceHandlerBundle(
       } catch { /* intentional: after-hooks do not cancel completed operations */ }
     }
 
+    // Phase 3.3: outbound webhook — fire-and-forget; framework gates allowlist.
+    if (emitWebhook) emitWebhook(`${lowerName}.created`, item)
+
     return c.json({ data: item }, 201)
   }
 
@@ -467,6 +475,8 @@ function buildResourceHandlerBundle(
       } catch { /* intentional */ }
     }
 
+    if (emitWebhook) emitWebhook(`${lowerName}.updated`, updated)
+
     return c.json({ data: updated })
   }
 
@@ -514,6 +524,8 @@ function buildResourceHandlerBundle(
         await executeHook(resource.hooks.afterDelete, handlers, { id }, c, store)
       } catch { /* intentional */ }
     }
+
+    if (emitWebhook) emitWebhook(`${lowerName}.deleted`, { id, ...existing })
 
     return c.json({ data: null })
   }
@@ -574,10 +586,11 @@ function registerResource(
   spec: ZeroAPISpec,
   authMiddleware?: MiddlewareHandler,
   uploadDir?: string,
-  handlers: Record<string, HandlerFn> = {}
+  handlers: Record<string, HandlerFn> = {},
+  emitWebhook?: EmitWebhookFn,
 ): { router: Hono; bundle: ResourceHandlerBundle } {
   const endpoints: CrudAction[] = resource.endpoints ?? DEFAULT_ENDPOINTS
-  const bundle = buildResourceHandlerBundle(resource, store, spec, authMiddleware, uploadDir, handlers)
+  const bundle = buildResourceHandlerBundle(resource, store, spec, authMiddleware, uploadDir, handlers, emitWebhook)
   const router = new Hono()
 
   // LIST — filtering, sorting, cursor pagination, includes
@@ -697,7 +710,8 @@ export function generateRoutes(
   store: DataStore,
   authMiddleware?: MiddlewareHandler,
   uploadDir?: string,
-  handlers: Record<string, HandlerFn> = {}
+  handlers: Record<string, HandlerFn> = {},
+  emitWebhook?: EmitWebhookFn,
 ): void {
   // First pass: build flat routes for every resource and remember the bundles
   // so the second pass can mount nested routes on the parent's router.
@@ -705,7 +719,7 @@ export function generateRoutes(
   for (const resource of spec.resources) {
     built.set(
       resource.name,
-      registerResource(resource, store, spec, authMiddleware, uploadDir, handlers),
+      registerResource(resource, store, spec, authMiddleware, uploadDir, handlers, emitWebhook),
     )
   }
 

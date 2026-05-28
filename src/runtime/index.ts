@@ -42,6 +42,12 @@ import {
   resolveStorageProvider, mountUploadRoutes, mountLocalUploadRoute,
   LocalStorage, type StorageProvider, type StorageBootLogger,
 } from '../storage/index.js'
+import {
+  MemoryWebhookStore, WebhookWorker, emitWebhook as emitWebhookImpl,
+  mountWebhookAdminRoutes, mountWebhookInboundRoutes,
+  type WebhookStore, type WebhookWorkerOptions, type InboundSourceConfig,
+  type InboundRoutesOptions,
+} from '../webhooks/index.js'
 
 export interface RuntimeOptions {
   enableLogging?: boolean
@@ -101,6 +107,20 @@ export interface RuntimeOptions {
   storageProvider?: StorageProvider
   /** Phase 3.2: receives storage boot warnings (e.g. local+prod). Defaults to `console.warn`. */
   storageBootLogger?: StorageBootLogger
+  /**
+   * Phase 3.3: explicit webhook store. Defaults to `MemoryWebhookStore` when
+   * `features.webhooks` is enabled. Plug in a Prisma-backed implementation in
+   * production.
+   */
+  webhookStore?: WebhookStore
+  /** Phase 3.3: overrides for the background delivery worker (interval, fetch, ...). */
+  webhookWorkerOptions?: WebhookWorkerOptions
+  /** Phase 3.3: skip starting the worker (tests). The worker is still constructed. */
+  webhookWorkerAutostart?: boolean
+  /** Phase 3.3: configure inbound webhook sources (signature header, secret env, ...). */
+  webhookInboundSources?: InboundSourceConfig[]
+  /** Phase 3.3: forwarded to `mountWebhookInboundRoutes` — onEvent, log, eventLog. */
+  webhookInboundOptions?: InboundRoutesOptions
 }
 
 export interface RuntimeResult {
@@ -117,6 +137,15 @@ export interface RuntimeResult {
    * store bootstrap is synchronous and `ready` resolves immediately.
    */
   ready: Promise<void>
+  /**
+   * Phase 3.3: webhook subsystem handles — present only when
+   * `features.webhooks` is enabled. `worker.stop()` must be called on shutdown
+   * (long-running tests, app teardown).
+   */
+  webhooks?: {
+    store: WebhookStore
+    worker: WebhookWorker
+  }
 }
 
 /**
@@ -162,6 +191,11 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     envBootLogger,
     storageProvider: providedStorageProvider,
     storageBootLogger,
+    webhookStore: providedWebhookStore,
+    webhookWorkerOptions,
+    webhookWorkerAutostart = true,
+    webhookInboundSources = [],
+    webhookInboundOptions,
   } = options
 
   // Chantier 4: Fail fast on missing env vars (legacy spec.requiredEnv)
@@ -281,8 +315,39 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     }
   }
 
+  // Phase 3.3: Webhooks — outbound emitter, admin routes, inbound sources, worker.
+  const webhooksFeature = spec.features?.webhooks
+  const outboundEvents = new Set(webhooksFeature?.outbound ?? [])
+  const inboundEvents = webhooksFeature?.inbound ?? []
+  const webhooksEnabled = !!webhooksFeature && (outboundEvents.size > 0 || inboundEvents.length > 0)
+
+  let webhooks: { store: WebhookStore; worker: WebhookWorker } | undefined
+  let webhookEmitter: ((eventType: string, payload: unknown) => void) | undefined
+
+  if (webhooksEnabled) {
+    const wStore = providedWebhookStore ?? new MemoryWebhookStore()
+    const wWorker = new WebhookWorker(wStore, webhookWorkerOptions ?? {})
+
+    if (outboundEvents.size > 0) {
+      // Gate at emit-time: only the events declared in `outbound` are dispatched.
+      webhookEmitter = (eventType, payload) => {
+        if (!outboundEvents.has(eventType) && !outboundEvents.has('*')) return
+        // Fire-and-forget; never block the request.
+        emitWebhookImpl(wStore, eventType, payload).catch(() => { /* swallow */ })
+      }
+      mountWebhookAdminRoutes(app, wStore, authMiddleware)
+    }
+
+    if (inboundEvents.length > 0) {
+      mountWebhookInboundRoutes(app, buildInboundSources(inboundEvents, webhookInboundSources), webhookInboundOptions ?? {})
+    }
+
+    if (webhookWorkerAutostart && outboundEvents.size > 0) wWorker.start()
+    webhooks = { store: wStore, worker: wWorker }
+  }
+
   // Chantier 1: Routes with hooks + custom endpoints
-  generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers)
+  generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers, webhookEmitter)
 
   // Chantier 5: Legacy auth flows — only when the new JWT user system is off,
   // since both register the same /auth/* paths.
@@ -306,7 +371,34 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     openApiSpec,
     spec,
     ready,
+    ...(webhooks ? { webhooks } : {}),
   }
+}
+
+/**
+ * Resolve inbound source configs from the spec's `features.webhooks.inbound`
+ * list (event slugs like `"stripe.payment"`) plus the operator-supplied
+ * overrides via `webhookInboundSources`. Each unique source slug becomes one
+ * endpoint at `POST /webhooks/inbound/<source>`.
+ */
+function buildInboundSources(
+  inboundEvents: string[],
+  overrides: InboundSourceConfig[] = [],
+): InboundSourceConfig[] {
+  const overrideMap = new Map(overrides.map((o) => [o.source, o]))
+  const sources = new Set<string>()
+  for (const event of inboundEvents) {
+    // "stripe.payment" → "stripe"; "stripe" → "stripe"
+    const slug = event.split('.')[0]
+    if (slug) sources.add(slug)
+  }
+  // Operator-defined overrides may add sources not declared in the spec.
+  for (const o of overrides) sources.add(o.source)
+
+  return [...sources].map((source) => {
+    const override = overrideMap.get(source)
+    return override ?? { source, secretEnv: `${source.toUpperCase()}_WEBHOOK_SECRET` }
+  })
 }
 
 /**

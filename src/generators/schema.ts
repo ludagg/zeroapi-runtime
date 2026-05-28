@@ -1,5 +1,6 @@
 import type { ZeroAPISpec, ResourceDefinition, FieldDefinition, FieldType } from '../types/spec.js'
 import { renderRelationFields, renderJoinModels } from '../relations/index.js'
+import { renderWebhookModels } from '../webhooks/schema.js'
 
 const PRISMA_TYPE_MAP: Record<FieldType, string> = {
   string: 'String', text: 'String', email: 'String', url: 'String', uuid: 'String',
@@ -126,7 +127,15 @@ datasource db {
     : []
   const oauthModel = oauthEnabled ? renderOAuthAccountModel() : null
 
-  const parts = [header, models, ...joinModels, apiKeyModel, ...jwtUserModels, oauthModel].filter(Boolean)
+  // Phase 3.3: webhook models — emitted only when the feature is enabled
+  // (either outbound or inbound events declared).
+  const webhooksFeature = spec.features?.webhooks
+  const webhooksEnabled =
+    !!webhooksFeature &&
+    ((webhooksFeature.outbound?.length ?? 0) > 0 || (webhooksFeature.inbound?.length ?? 0) > 0)
+  const webhookModels = webhooksEnabled ? renderWebhookModels() : []
+
+  const parts = [header, models, ...joinModels, apiKeyModel, ...jwtUserModels, oauthModel, ...webhookModels].filter(Boolean)
   return parts.join('\n\n') + '\n'
 }
 

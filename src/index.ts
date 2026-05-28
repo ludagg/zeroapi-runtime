@@ -116,6 +116,24 @@ export { uploadFile, validateFile, parseMaxSize, processFileFields } from './upl
 export { uploadLocal } from './upload/providers/local.js'
 export { generatePresignedPutUrl } from './upload/providers/s3.js'
 
+// ── Webhooks (Phase 3.3) ──────────────────────────────────────────────────────
+export {
+  MemoryWebhookStore,
+  WebhookWorker, computeBackoffDelay, endpointSubscribesTo,
+  emitWebhook, buildResourceEventType,
+  signPayload, verifySignature, generateWebhookSecret,
+  SIGNATURE_HEADER, EVENT_TYPE_HEADER, EVENT_ID_HEADER,
+  mountWebhookAdminRoutes, mountWebhookInboundRoutes,
+  InboundEventLog, renderWebhookModels,
+} from './webhooks/index.js'
+export type {
+  WebhookStore, WebhookEndpointRecord, WebhookEventRecord, WebhookEventStatus,
+  CreateWebhookEndpointInput, CreateWebhookEventInput,
+  ClaimEventsOptions, UpdateAfterAttemptInput,
+  EmitWebhookOptions, WebhookWorkerOptions,
+  AdminRoutesOptions, InboundSourceConfig, InboundRoutesOptions, InboundEventRecord,
+} from './webhooks/index.js'
+
 // ── Storage (Phase 3.2) ───────────────────────────────────────────────────────
 export {
   LocalStorage, S3Storage,
