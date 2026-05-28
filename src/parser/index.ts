@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { ZeroAPISpec, ResourceDefinition } from '../types/spec.js'
+import { normalizeTopLevelRelations } from '../relations/index.js'
 
 // ── Field ─────────────────────────────────────────────────────────────────────
 
@@ -288,6 +289,32 @@ function validateRelations(resources: ResourceDefinition[]): string | null {
         }
         throughNames.add(rel.through)
       }
+      // Phase 2.1: a SetNull onDelete on a required FK is incoherent — Prisma would
+      // refuse to write NULL into a NOT NULL column, so reject at parse time.
+      if (
+        rel.required === true &&
+        rel.onDelete === 'SetNull' &&
+        (rel.type === 'manyToOne' || rel.type === 'oneToOne')
+      ) {
+        return `Relation "${resource.name}" → "${rel.resource}" uses onDelete: SetNull on a required FK — the column cannot be NULL`
+      }
+      // Phase 2.1: a relation's `field` (the FK column name), when also declared
+      // as a spec field, must be a uuid/string type (FKs are strings). The
+      // generator drops the duplicate from the Prisma model, but a non-string
+      // declaration would mismatch the FK type at runtime.
+      if (
+        (rel.type === 'manyToOne' || rel.type === 'oneToOne') &&
+        rel.field !== undefined
+      ) {
+        const declared = resource.fields[rel.field]
+        if (
+          declared &&
+          declared.type !== 'string' &&
+          declared.type !== 'uuid'
+        ) {
+          return `Relation "${resource.name}" → "${rel.resource}" reuses field "${rel.field}" but it is declared as "${declared.type}" — FK fields must be string/uuid`
+        }
+      }
     }
   }
 
@@ -320,6 +347,19 @@ function validateSpecLevelBlocks(spec: ZeroAPISpec): string | null {
     }
     if (rel.type === 'many-to-many' && !rel.through) {
       return `Top-level many-to-many relation "${rel.from}" → "${rel.to}" requires a "through" field`
+    }
+    // Phase 2.1: a top-level relation's `field` (the FK column name), when also
+    // declared as a spec field, must be a string/uuid — the FK is always a
+    // string and a non-matching declared type would break the generated code.
+    const fromRes = spec.resources.find((r) => r.name === rel.from)
+    if (
+      fromRes &&
+      (rel.type === 'many-to-one' || rel.type === 'one-to-one')
+    ) {
+      const declared = fromRes.fields[rel.field]
+      if (declared && declared.type !== 'string' && declared.type !== 'uuid') {
+        return `Top-level relation "${rel.from}" → "${rel.to}" reuses field "${rel.field}" but it is declared as "${declared.type}" — FK fields must be string/uuid`
+      }
     }
   }
 
@@ -390,21 +430,27 @@ export function parseSpec(raw: unknown): ZeroAPISpec {
     throw new ParseError(`Invalid ZeroAPI spec — ${summary}`, result.error)
   }
 
-  const spec = result.data as ZeroAPISpec
+  const rawSpec = result.data as ZeroAPISpec
+
+  const topLevelError = validateSpecLevelBlocks(rawSpec)
+  if (topLevelError) {
+    const zodError = new z.ZodError([
+      { code: z.ZodIssueCode.custom, message: topLevelError, path: [] },
+    ])
+    throw new ParseError(`Invalid ZeroAPI spec — ${topLevelError}`, zodError)
+  }
+
+  // Phase 2.1: fold each top-level relation into the matching resource's
+  // per-resource relations[] so the rest of the runtime (schema, includes,
+  // nested routes, memory joins) all read from one shape.
+  const spec = normalizeTopLevelRelations(rawSpec)
+
   const relError = validateRelations(spec.resources)
   if (relError) {
     const relZodError = new z.ZodError([
       { code: z.ZodIssueCode.custom, message: relError, path: ['resources'] },
     ])
     throw new ParseError(`Invalid ZeroAPI spec — ${relError}`, relZodError)
-  }
-
-  const topLevelError = validateSpecLevelBlocks(spec)
-  if (topLevelError) {
-    const zodError = new z.ZodError([
-      { code: z.ZodIssueCode.custom, message: topLevelError, path: [] },
-    ])
-    throw new ParseError(`Invalid ZeroAPI spec — ${topLevelError}`, zodError)
   }
 
   return spec
