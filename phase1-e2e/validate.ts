@@ -158,13 +158,11 @@ async function main(): Promise<void> {
         `${res.status}`, res.status === 401)
     }
 
-    // #5 refresh — wait 1.1s so the new JWT's iat differs from the original
-    // (JWT iat has 1-second resolution; without the wait, the signed payload
-    // can hash to the same string and the rotation is invisible at the wire).
+    // #5 refresh — issued back-to-back; the jti claim guarantees the new
+    // access token is byte-different even when iat is unchanged.
     let refreshedAccess = ''
     let rotatedRefresh = ''
     {
-      await wait(1100)
       const res = await http(base, 'POST', '/auth/refresh', {
         body: { refreshToken: captured.jwt.refreshToken },
       })

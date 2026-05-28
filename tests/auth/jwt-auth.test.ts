@@ -420,6 +420,27 @@ describe('JWT_SECRET resolution', () => {
 
 // ── parseTTL ─────────────────────────────────────────────────────────────────
 
+describe('generateAccessToken — jti uniqueness', () => {
+  it('emits a distinct jti on every call, even when issued in the same second', async () => {
+    const a = await generateAccessToken('u1', 'u@x.com', 'user', 'secret', 60)
+    const b = await generateAccessToken('u1', 'u@x.com', 'user', 'secret', 60)
+
+    expect(a).not.toBe(b)
+
+    const decode = (token: string) =>
+      JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as Record<string, unknown>
+
+    const pa = decode(a)
+    const pb = decode(b)
+
+    expect(typeof pa['jti']).toBe('string')
+    expect(typeof pb['jti']).toBe('string')
+    expect(pa['jti']).not.toBe(pb['jti'])
+    // Same iat (best-effort proves the differentiator is jti, not time)
+    expect(pa['iat']).toBe(pb['iat'])
+  })
+})
+
 describe('parseTTL', () => {
   it('parses common suffixes', () => {
     expect(parseTTL('60s', 0)).toBe(60)

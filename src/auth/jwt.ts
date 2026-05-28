@@ -8,6 +8,9 @@ export interface JwtPayload {
   role: string
   iat: number
   exp: number
+  /** RFC 7519 unique token id — guarantees per-token uniqueness even when two
+   *  tokens are issued in the same second with otherwise identical claims. */
+  jti: string
 }
 
 export type JwtSecretLogger = (line: string) => void
@@ -84,6 +87,7 @@ export async function generateAccessToken(
   const now = Math.floor(Date.now() / 1000)
   const payload: Record<string, unknown> = {
     sub: userId, email, role, iat: now, exp: now + ttlSec,
+    jti: crypto.randomUUID(),
   }
   return sign(payload, secret, 'HS256')
 }
@@ -99,7 +103,8 @@ export async function verifyAccessToken(
       typeof decoded['email'] !== 'string' ||
       typeof decoded['role'] !== 'string' ||
       typeof decoded['iat'] !== 'number' ||
-      typeof decoded['exp'] !== 'number'
+      typeof decoded['exp'] !== 'number' ||
+      typeof decoded['jti'] !== 'string'
     ) return null
     return decoded as unknown as JwtPayload
   } catch {
