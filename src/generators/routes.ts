@@ -225,11 +225,13 @@ function registerResource(
       const id  = randomUUID()
       const now = new Date().toISOString()
       const item: Record<string, unknown> = {
-        id, createdAt: now, updatedAt: now,
         ...schemaResult.data,
         ...Object.fromEntries(fkFields.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
         // Re-attach file URLs (already uploaded, not part of Zod schema)
         ...Object.fromEntries(fileFieldKeys.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
+        // Server-managed fields applied last so a client-supplied id/createdAt/updatedAt
+        // in the body cannot desync item.id from the store key.
+        id, createdAt: now, updatedAt: now,
       }
       getStore().set(id, item)
 
@@ -315,6 +317,9 @@ function registerResource(
         ...existing,
         ...updateData,
         ...Object.fromEntries(fkFieldsUpd.map((k) => [k, read.data[k]]).filter(([, v]) => v != null)),
+        // Server-managed fields applied last: id is pinned to the route param (the store key)
+        // and updatedAt is set by the server, so a client-supplied value in the body is ignored.
+        id,
         updatedAt: new Date().toISOString(),
       }
       getStore().set(id, updated)
