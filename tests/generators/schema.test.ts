@@ -76,6 +76,89 @@ describe('generatePrismaSchema', () => {
     expect(thingBlock).toContain('label')
   })
 
+  it('renders long field names with a space before the Prisma type', () => {
+    // Regression for the "priceAtPurchaseDecimal" bug: padEnd(14) used to
+    // glue the name to the type when the name was ≥ 14 chars.
+    const schema = generatePrismaSchema({
+      version: '1.0.0',
+      name: 'long-name-api',
+      resources: [
+        {
+          name: 'OrderItem',
+          fields: {
+            priceAtPurchase: { type: 'decimal', required: true },
+          },
+        },
+      ],
+    })
+
+    const block = schema.match(/model OrderItem \{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(block).not.toMatch(/priceAtPurchaseDecimal/)
+    expect(block).toMatch(/^\s{2}priceAtPurchase\s+Decimal\s*$/m)
+  })
+
+  it('maps every supported field type to a syntactically valid Prisma line', () => {
+    const schema = generatePrismaSchema({
+      version: '1.0.0',
+      name: 'all-types-api',
+      resources: [
+        {
+          name: 'AllTypes',
+          fields: {
+            // Short and long names to exercise both padding branches.
+            str:                  { type: 'string',   required: true },
+            txt:                  { type: 'text',     required: true },
+            mail:                 { type: 'email',    required: true },
+            link:                 { type: 'url',      required: true },
+            uid:                  { type: 'uuid',     required: true },
+            num:                  { type: 'number',   required: true },
+            count:                { type: 'integer',  required: true },
+            priceAtPurchase:      { type: 'decimal',  required: true },
+            isPublished:          { type: 'boolean',  required: true },
+            birthday:             { type: 'date',     required: true },
+            scheduledAtTimestamp: { type: 'datetime', required: true },
+            avatar:               { type: 'file',     required: true },
+            attachments:          { type: 'file[]',   required: true },
+            metadataPayload:      { type: 'json',     required: true },
+            status:               { type: 'enum',     required: true, values: ['a', 'b'] },
+          },
+        },
+      ],
+    })
+
+    const block = schema.match(/model AllTypes \{[\s\S]*?\n\}/)?.[0] ?? ''
+    const expectations: Array<[string, string]> = [
+      ['str',                  'String'],
+      ['txt',                  'String'],
+      ['mail',                 'String'],
+      ['link',                 'String'],
+      ['uid',                  'String'],
+      ['num',                  'Float'],
+      ['count',                'Int'],
+      ['priceAtPurchase',      'Decimal'],
+      ['isPublished',          'Boolean'],
+      ['birthday',             'DateTime'],
+      ['scheduledAtTimestamp', 'DateTime'],
+      ['avatar',               'String'],
+      ['attachments',          'String'],
+      ['metadataPayload',      'Json'],
+      ['status',               'String'],
+    ]
+    for (const [fieldName, prismaType] of expectations) {
+      // Each field line must have the shape "  <name>  <Type>" — name and type
+      // separated by at least one whitespace, never concatenated.
+      const re = new RegExp(`^  ${fieldName}\\s+${prismaType}\\b`, 'm')
+      expect(block, `expected "${fieldName} ${prismaType}" line`).toMatch(re)
+    }
+
+    // Sanity: no line should ever start with "  <name><Type>" (no glue).
+    const bodyLines = block.split('\n').slice(1, -1)
+    for (const line of bodyLines) {
+      expect(line, `field line should not glue name and type: ${line}`)
+        .toMatch(/^\s{2}\w+\s+[A-Z]\w*(\[\])?\??/)
+    }
+  })
+
   it('does not re-declare a FK field already owned by a relation', () => {
     const schema = generatePrismaSchema({
       version: '1.0.0',
