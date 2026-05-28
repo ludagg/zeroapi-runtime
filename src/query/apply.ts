@@ -1,4 +1,5 @@
 import type { FilterMap, SortSpec, PaginationSpec, ParsedQuery } from './builder.js'
+import type { ResourceDefinition, FeaturesConfig } from '../types/spec.js'
 
 type Row = Record<string, unknown>
 
@@ -13,6 +14,7 @@ function matchesCondition(value: unknown, cond: FilterMap[string]): boolean {
   if (cond.eq         !== undefined && value !== cond.eq)         return false
   if (cond.ne         !== undefined && value === cond.ne)         return false
   if (cond.in         !== undefined && !cond.in.includes(String(value))) return false
+  if (cond.notin      !== undefined && cond.notin.includes(String(value))) return false
 
   if (cond.contains   !== undefined &&
     !String(value).toLowerCase().includes(String(cond.contains).toLowerCase())) return false
@@ -33,6 +35,38 @@ export function applyFilters(items: Row[], filters: FilterMap): Row[] {
   if (Object.keys(filters).length === 0) return items
   return items.filter((item) =>
     Object.entries(filters).every(([field, cond]) => matchesCondition(item[field], cond))
+  )
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+/**
+ * Filters items by a full-text query `q` against the resource's `searchable`
+ * fields. Case-insensitive substring match (OR across all searchable fields).
+ *
+ * Skipped when:
+ *  - `q` is empty/undefined
+ *  - `features.search.enabled` is not true
+ *  - the resource declares no `searchable` fields
+ */
+export function applySearch(
+  items: Row[],
+  q: string | undefined,
+  resource: ResourceDefinition,
+  features?: FeaturesConfig,
+): Row[] {
+  if (!q || q.length === 0) return items
+  if (features?.search?.enabled !== true) return items
+  const searchable = resource.searchable ?? []
+  if (searchable.length === 0) return items
+
+  const needle = q.toLowerCase()
+  return items.filter((item) =>
+    searchable.some((field) => {
+      const v = item[field]
+      if (v === undefined || v === null) return false
+      return String(v).toLowerCase().includes(needle)
+    })
   )
 }
 
@@ -78,19 +112,92 @@ export function applyPagination(
 
 // ── Combined ──────────────────────────────────────────────────────────────────
 
+export interface PaginationMeta {
+  page: number
+  limit: number
+  total: number
+  totalPages: number
+  hasNext: boolean
+  hasPrev: boolean
+}
+
 export interface QueryResult {
   data: Row[]
   count: number
   nextCursor: string | null
+  pagination: PaginationMeta
+}
+
+export interface ApplyQueryOptions {
+  /** Required for ?q= search. Without a resource the search step is skipped. */
+  resource?: ResourceDefinition
+  /** Drives features-gated behaviour (search). */
+  features?: FeaturesConfig
 }
 
 /**
- * Applies all query clauses (filter → sort → paginate) to an in-memory array.
- * `count` reflects the total matching records before pagination.
+ * Applies all query clauses (filter → search → sort → paginate) to an in-memory
+ * array. `count` reflects the total matching records before pagination.
+ *
+ * Pagination mode resolution:
+ *   - if `query.pagination.cursor` is set → cursor mode (returns nextCursor)
+ *   - else if `query.pagination.page` is set → offset mode
+ *   - else → cursor mode with no cursor (first page); backward compatible
+ *
+ * The `pagination` meta block is always populated so consumers can read totals
+ * regardless of mode.
  */
-export function applyQuery(items: Row[], query: ParsedQuery): QueryResult {
+export function applyQuery(
+  items: Row[],
+  query: ParsedQuery,
+  options: ApplyQueryOptions = {},
+): QueryResult {
   const filtered = applyFilters(items, query.filters)
-  const sorted   = applySorts(filtered, query.sorts)
-  const { data, nextCursor } = applyPagination(sorted, query.pagination)
-  return { data, count: filtered.length, nextCursor }
+  const searched = options.resource
+    ? applySearch(filtered, query.q, options.resource, options.features)
+    : filtered
+  const sorted = applySorts(searched, query.sorts)
+
+  const total = sorted.length
+  const limit = query.pagination.limit
+
+  let data: Row[]
+  let nextCursor: string | null
+  let page: number
+
+  if (query.pagination.cursor !== undefined) {
+    // Cursor mode — page count is not really meaningful, but report a 1-indexed
+    // approximation based on the slice position so callers always get a number.
+    const result = applyPagination(sorted, query.pagination)
+    data = result.data
+    nextCursor = result.nextCursor
+    const idx = sorted.findIndex((item) => item['id'] === query.pagination.cursor)
+    const startIndex = idx >= 0 ? idx + 1 : 0
+    page = limit > 0 ? Math.floor(startIndex / limit) + 1 : 1
+  } else if (query.pagination.page !== undefined) {
+    // Offset mode — explicit page number.
+    page = Math.max(1, query.pagination.page)
+    const start = (page - 1) * limit
+    data = sorted.slice(start, start + limit)
+    nextCursor = null
+  } else {
+    // No cursor, no page — keep legacy first-page behaviour with cursor-style
+    // nextCursor so existing clients are unaffected.
+    const result = applyPagination(sorted, query.pagination)
+    data = result.data
+    nextCursor = result.nextCursor
+    page = 1
+  }
+
+  const totalPages = limit > 0 ? Math.ceil(total / limit) : 0
+  const pagination: PaginationMeta = {
+    page,
+    limit,
+    total,
+    totalPages,
+    hasNext: page < totalPages,
+    hasPrev: page > 1,
+  }
+
+  return { data, count: total, nextCursor, pagination }
 }
