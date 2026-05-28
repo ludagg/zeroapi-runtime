@@ -90,6 +90,7 @@ export type { RequesterIdentity, OwnershipFilter } from './rbac/resource-permiss
 // ── Docs ──────────────────────────────────────────────────────────────────────
 export { generateOpenAPISpec } from './docs/swagger.js'
 export { renderScalarPage, mountScalarDocs } from './docs/scalar.js'
+export { generateReadme } from './docs/readme.js'
 
 // ── Deploy ────────────────────────────────────────────────────────────────────
 export { generateRailwayConfig, getRailwayDeployButton } from './deploy/external/railway.js'
