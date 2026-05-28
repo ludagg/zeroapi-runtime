@@ -40,6 +40,7 @@ That's it. You get: `GET/POST /posts`, `GET/PUT/DELETE /posts/:id`, Zod validati
 | **Pagination** | Cursor-based (`?cursor=id&limit=20`) — stable across requests |
 | **Transactions** | Spec-level atomic ops (increment, decrement, create, delete) — 409 on failure |
 | **File upload** | `file` field type, local / S3 / R2 providers, MIME + size validation |
+| **Webhooks** | `features.webhooks` — outbound HMAC-signed events with retry + admin endpoints, inbound signature verification |
 | **Auth** | JWT middleware, per-resource `auth.required` |
 | **RBAC** | Role hierarchy with transitive inheritance, per-resource read/write/delete guards |
 | **Security** | Helmet headers, CORS, rate limiting, JSON sanitisation |
@@ -117,6 +118,24 @@ fields: {
 // Client: POST multipart/form-data
 // Response: { data: { id: '…', image: '/uploads/abc123.jpg' } }
 ```
+
+### Webhooks (outbound + inbound)
+
+```ts
+// Spec
+features: {
+  webhooks: {
+    outbound: ['order.created', 'order.updated'],   // events the API emits
+    inbound:  ['stripe.payment'],                   // signed events the API receives
+  },
+}
+```
+
+When enabled the runtime:
+
+- Mounts `POST /admin/webhooks`, `GET /admin/webhooks`, `DELETE /admin/webhooks/:id`, `GET /admin/webhooks/:id/deliveries` for endpoint management. Secrets are returned **only** at creation.
+- Mounts `POST /webhooks/inbound/:source` per declared inbound source. Verifies the HMAC signature against `${SOURCE}_WEBHOOK_SECRET`. Mismatch → `401`. Provider-specific signature headers (e.g. `Stripe-Signature`) can be wired via `webhookInboundSources` on `createRuntime`.
+- Starts an in-process worker that POSTs queued events to each subscribed endpoint with `X-Webhook-Signature` (HMAC-SHA256 of the JSON body), `X-Webhook-Event`, `X-Webhook-Id`. Retries with exponential backoff (30s → 30min cap, 5 attempts by default) and a 2-minute lock TTL for multi-replica safety.
 
 ---
 
