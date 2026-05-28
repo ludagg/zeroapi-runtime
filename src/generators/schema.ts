@@ -29,7 +29,17 @@ function renderField(name: string, field: FieldDefinition): string {
 
 const RESERVED_FIELDS = new Set(['id', 'createdAt', 'updatedAt'])
 
-function renderModel(resource: ResourceDefinition, allResources: ResourceDefinition[]): string {
+function resourceHasOwnOnly(spec: ZeroAPISpec, resourceName: string): boolean {
+  return (spec.permissions ?? []).some(
+    (p) => p.resource === resourceName && p.rules.some((r) => r.ownOnly),
+  )
+}
+
+function renderModel(
+  resource: ResourceDefinition,
+  allResources: ResourceDefinition[],
+  ownedByUser: boolean,
+): string {
   const modelName = resource.name.charAt(0).toUpperCase() + resource.name.slice(1)
 
   // FK fields owned by relations — must not be re-declared from spec fields
@@ -39,6 +49,9 @@ function renderModel(resource: ResourceDefinition, allResources: ResourceDefinit
       relationFkFields.add(rel.field ?? `${rel.resource.toLowerCase()}Id`)
     }
   }
+  // Skip a spec-declared "userId" field when ownership injection owns the column,
+  // so we don't emit it twice.
+  if (ownedByUser) relationFkFields.add('userId')
 
   const baseFields = [
     `  id            String   @id @default(cuid())`,
@@ -48,6 +61,11 @@ function renderModel(resource: ResourceDefinition, allResources: ResourceDefinit
       .filter(([name]) => !RESERVED_FIELDS.has(name) && !relationFkFields.has(name))
       .map(([name, field]) => renderField(name, field)),
   ]
+
+  if (ownedByUser) {
+    baseFields.push(`  userId        String`)
+    baseFields.push(`  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)`)
+  }
 
   const relationLines = renderRelationFields(resource, allResources)
 
@@ -74,7 +92,11 @@ datasource db {
   // Deep-clone resources so renderJoinModels can mutate the copy safely
   const resources = spec.resources.map((r) => ({ ...r, relations: r.relations ? [...r.relations] : undefined }))
 
-  const models = resources.map((r) => renderModel(r, resources)).join('\n\n')
+  const ownedResources = resources.filter((r) => resourceHasOwnOnly(spec, r.name))
+
+  const models = resources
+    .map((r) => renderModel(r, resources, resourceHasOwnOnly(spec, r.name)))
+    .join('\n\n')
 
   // Collect join models (manyToMany)
   const joinModels: string[] = []
@@ -94,9 +116,12 @@ datasource db {
     spec.auth?.strategy === 'apikey' || spec.auth?.apikey?.enabled === true
   const apiKeyModel = apiKeyAuthEnabled ? renderApiKeyModel() : null
 
-  // Phase 1.2: JWT user system — emit User + RefreshToken when opted in
+  // Phase 1.2: JWT user system — emit User + RefreshToken when opted in.
+  // Phase 1.3: extend User with back-relations for each ownOnly-owned resource.
   const jwtUserSystemEnabled = spec.auth?.jwt?.enabled === true
-  const jwtUserModels = jwtUserSystemEnabled ? renderJwtUserModels() : []
+  const jwtUserModels = jwtUserSystemEnabled
+    ? renderJwtUserModels(ownedResources.map((r) => r.name))
+    : []
 
   const parts = [header, models, ...joinModels, apiKeyModel, ...jwtUserModels].filter(Boolean)
   return parts.join('\n\n') + '\n'
@@ -108,13 +133,21 @@ function renderApiKeyModel(): string {
   keyHash    String    @unique
   keyPrefix  String
   name       String?
+  role       String    @default("admin")
   revoked    Boolean   @default(false)
   lastUsedAt DateTime?
   createdAt  DateTime  @default(now())
 }`
 }
 
-function renderJwtUserModels(): string[] {
+function renderJwtUserModels(ownedResourceNames: string[]): string[] {
+  const ownedLines = ownedResourceNames.map((name) => {
+    const modelName = name.charAt(0).toUpperCase() + name.slice(1)
+    // Field name is the lower-cased plural model name to avoid collisions with refreshTokens.
+    const field = `owned${modelName}s`
+    return `  ${field.padEnd(13)} ${modelName}[]`
+  })
+
   const userModel = `model User {
   id            String    @id @default(uuid())
   email         String    @unique
@@ -124,7 +157,7 @@ function renderJwtUserModels(): string[] {
   emailVerified Boolean   @default(false)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
-  refreshTokens RefreshToken[]
+  refreshTokens RefreshToken[]${ownedLines.length > 0 ? '\n' + ownedLines.join('\n') : ''}
 }`
 
   const refreshTokenModel = `model RefreshToken {

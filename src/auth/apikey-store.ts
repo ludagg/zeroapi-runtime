@@ -5,6 +5,8 @@ export interface ApiKeyRecord {
   keyHash: string
   keyPrefix: string
   name?: string
+  /** RBAC role carried by requests authenticated with this key. Defaults to 'admin'. */
+  role: string
   revoked: boolean
   lastUsedAt?: Date
   createdAt: Date
@@ -14,6 +16,7 @@ export interface CreateApiKeyInput {
   keyHash: string
   keyPrefix: string
   name?: string
+  role?: string
 }
 
 /**
@@ -80,6 +83,7 @@ export class MemoryApiKeyStore implements ApiKeyStore {
       keyHash: input.keyHash,
       keyPrefix: input.keyPrefix,
       name: input.name,
+      role: input.role ?? 'admin',
       revoked: false,
       createdAt: new Date(),
     }

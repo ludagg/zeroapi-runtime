@@ -1,11 +1,18 @@
 import { Hono } from 'hono'
 import { randomUUID } from 'crypto'
 import type { Context, MiddlewareHandler } from 'hono'
-import type { ZeroAPISpec, ResourceDefinition, CrudAction, CustomEndpointDef } from '../types/spec.js'
+import type {
+  ZeroAPISpec, ResourceDefinition, CrudAction, CustomEndpointDef, PermissionAction,
+} from '../types/spec.js'
 import type { DataStore, ResourceStore } from '../types/store.js'
 import type { HandlerFn } from '../hooks/types.js'
 import { generateZodSchemas } from './validation.js'
 import { createPermissionMiddleware } from '../rbac/permissions.js'
+import {
+  buildResourcePermissionGuard,
+  getOwnershipFilter,
+  resourceHasOwnOnly,
+} from '../rbac/resource-permissions.js'
 import { parseQueryParams } from '../query/builder.js'
 import { applyQuery } from '../query/apply.js'
 import { applyIncludes, extractNestedRelations, persistNestedRelations } from '../relations/index.js'
@@ -32,15 +39,32 @@ function composeGuard(guards: MiddlewareHandler[]): MiddlewareHandler | null {
   }
 }
 
+/**
+ * Maps a CRUD-style route action to the permission action it represents.
+ * Mirrors the spec: list/read → "read", create → "create", update → "update", delete → "delete".
+ */
+function toPermissionAction(action: 'list' | 'read' | 'create' | 'update' | 'delete'): PermissionAction {
+  return action === 'list' ? 'read' : action
+}
+
 function buildGuard(
   resource: ResourceDefinition,
-  action: 'read' | 'write' | 'delete',
+  action: 'list' | 'read' | 'create' | 'update' | 'delete',
   spec: ZeroAPISpec,
   globalAuth?: MiddlewareHandler
 ): MiddlewareHandler | null {
+  // Modern permissions block takes precedence — when present it covers auth + RBAC.
+  const permGuard = buildResourcePermissionGuard(spec, resource, toPermissionAction(action), globalAuth)
+  if (permGuard) return permGuard
+
+  // Legacy: resource-level rbac block (read/write/delete).
+  const legacyAction: 'read' | 'write' | 'delete' =
+    action === 'list' || action === 'read' ? 'read' :
+    action === 'delete' ? 'delete' : 'write'
+
   const guards: MiddlewareHandler[] = []
   if (resource.auth?.required && globalAuth) guards.push(globalAuth)
-  const allowed = resource.rbac?.[action]
+  const allowed = resource.rbac?.[legacyAction]
   if (allowed && allowed.length > 0) guards.push(createPermissionMiddleware(allowed, spec))
   return composeGuard(guards)
 }
@@ -131,17 +155,25 @@ function registerResource(
   if (!store.has(key)) store.set(key, new Map())
   const getStore = (): ResourceStore => store.get(key) as ResourceStore
 
+  const listGuard   = buildGuard(resource, 'list',   spec, authMiddleware)
   const readGuard   = buildGuard(resource, 'read',   spec, authMiddleware)
-  const writeGuard  = buildGuard(resource, 'write',  spec, authMiddleware)
+  const createGuard = buildGuard(resource, 'create', spec, authMiddleware)
+  const updateGuard = buildGuard(resource, 'update', spec, authMiddleware)
   const deleteGuard = buildGuard(resource, 'delete', spec, authMiddleware)
+
+  const hasOwnOnly = resourceHasOwnOnly(spec, resource.name)
 
   const router = new Hono()
 
   // LIST — filtering, sorting, cursor pagination, includes
   if (endpoints.includes('list')) {
-    mount(router, 'get', '/', readGuard, (c) => {
+    mount(router, 'get', '/', listGuard, (c) => {
       const query = parseQueryParams(new URL(c.req.url))
-      const allItems = Array.from(getStore().values())
+      let allItems = Array.from(getStore().values())
+      const ownership = getOwnershipFilter(c)
+      if (ownership) {
+        allItems = allItems.filter((item) => item['userId'] === ownership.userId)
+      }
       const { data, count, nextCursor } = applyQuery(allItems, query)
       const enriched = applyIncludes(data, query.include, resource, spec, store)
       return c.json({ data: enriched, count, ...(nextCursor ? { nextCursor } : {}) })
@@ -176,9 +208,16 @@ function registerResource(
 
   // CREATE — file upload, nested relations, transactions, hooks
   if (endpoints.includes('create')) {
-    mount(router, 'post', '/', writeGuard, async (c) => {
+    mount(router, 'post', '/', createGuard, async (c) => {
       const read = await readBody(c, resource, uploadDir)
       if (!read.ok) return read.res
+
+      // ownOnly create: the requester owns the new row by construction.
+      // Force userId from the authenticated identity, overriding any client-supplied value.
+      const ownership = getOwnershipFilter(c)
+      if (ownership) {
+        read.data['userId'] = ownership.userId
+      }
 
       // Extract nested manyToMany data before validation
       const { body: cleanBody, nested } = extractNestedRelations(read.data, resource)
@@ -229,6 +268,8 @@ function registerResource(
         ...Object.fromEntries(fkFields.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
         // Re-attach file URLs (already uploaded, not part of Zod schema)
         ...Object.fromEntries(fileFieldKeys.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
+        // ownOnly: pin userId from the authenticated identity (not part of Zod schema).
+        ...(hasOwnOnly && cleanBody['userId'] != null ? { userId: cleanBody['userId'] } : {}),
         // Server-managed fields applied last so a client-supplied id/createdAt/updatedAt
         // in the body cannot desync item.id from the store key.
         id, createdAt: now, updatedAt: now,
@@ -264,6 +305,12 @@ function registerResource(
       const item = getStore().get(id)
       if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
+      // ownOnly: hide non-owned rows behind 404 so existence is not leaked.
+      const ownership = getOwnershipFilter(c)
+      if (ownership && item['userId'] !== ownership.userId) {
+        return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+      }
+
       const query = parseQueryParams(new URL(c.req.url))
       const enriched = query.include.length > 0
         ? applyIncludes([item], query.include, resource, spec, store)[0] ?? item
@@ -275,10 +322,16 @@ function registerResource(
 
   // UPDATE — file upload, transactions, hooks
   if (endpoints.includes('update')) {
-    mount(router, 'put', '/:id', writeGuard, async (c) => {
+    mount(router, 'put', '/:id', updateGuard, async (c) => {
       const id = c.req.param('id') ?? ''
       const existing = getStore().get(id)
       if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+
+      // ownOnly: editing someone else's row reports 404, not 403.
+      const ownership = getOwnershipFilter(c)
+      if (ownership && existing['userId'] !== ownership.userId) {
+        return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+      }
 
       const read = await readBody(c, resource, uploadDir)
       if (!read.ok) return read.res
@@ -321,6 +374,8 @@ function registerResource(
         // and updatedAt is set by the server, so a client-supplied value in the body is ignored.
         id,
         updatedAt: new Date().toISOString(),
+        // ownOnly: ownership can never be transferred via PUT.
+        ...(hasOwnOnly && existing['userId'] != null ? { userId: existing['userId'] } : {}),
       }
       getStore().set(id, updated)
 
@@ -339,7 +394,14 @@ function registerResource(
   if (endpoints.includes('delete')) {
     mount(router, 'delete', '/:id', deleteGuard, async (c) => {
       const id = c.req.param('id') ?? ''
-      if (!getStore().has(id)) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+      const existing = getStore().get(id)
+      if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+
+      // ownOnly: deleting someone else's row reports 404, not 403.
+      const ownership = getOwnershipFilter(c)
+      if (ownership && existing['userId'] !== ownership.userId) {
+        return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+      }
 
       // beforeDelete hook — can throw to cancel
       if (resource.hooks?.beforeDelete) {

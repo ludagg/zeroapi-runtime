@@ -395,6 +395,7 @@ function makeMockPrisma(): PrismaLikeClient & { rows: Map<string, PrismaApiKeyRo
           keyHash: data.keyHash,
           keyPrefix: data.keyPrefix,
           name: data.name ?? null,
+          role: data.role ?? 'admin',
           revoked: false,
           lastUsedAt: null,
           createdAt: new Date(),

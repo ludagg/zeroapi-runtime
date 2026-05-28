@@ -57,6 +57,11 @@ export type {
 // ── RBAC ──────────────────────────────────────────────────────────────────────
 export { getEffectiveRoles, extractRoleFromHeader, hasPermission } from './rbac/roles.js'
 export { createPermissionMiddleware } from './rbac/permissions.js'
+export {
+  buildResourcePermissionGuard, getRequesterIdentity, getOwnershipFilter,
+  resourceHasOwnOnly, isAuthEnabled,
+} from './rbac/resource-permissions.js'
+export type { RequesterIdentity, OwnershipFilter } from './rbac/resource-permissions.js'
 
 // ── Docs ──────────────────────────────────────────────────────────────────────
 export { generateOpenAPISpec } from './docs/swagger.js'
