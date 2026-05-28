@@ -16,6 +16,8 @@ import { mountAuthFlows } from '../auth/flows/index.js'
 import { MemoryApiKeyStore, type ApiKeyStore } from '../auth/apikey-store.js'
 import { mountApiKeyRoutes } from '../auth/apikey-routes.js'
 import { bootstrapMemoryApiKeysSync, bootstrapApiKeys, type BootstrapLogger } from '../auth/apikey-bootstrap.js'
+import { PrismaApiKeyStore, type PrismaLikeClient } from '../auth/prisma-apikey-store.js'
+import { tryAutoLoadPrismaApiKeyStore } from '../auth/apikey-autodetect.js'
 import { createHelmetMiddleware } from '../security/helmet.js'
 import { createCorsMiddleware } from '../security/cors.js'
 import { createRateLimitMiddleware } from '../security/ratelimit.js'
@@ -41,8 +43,15 @@ export interface RuntimeOptions {
   rateLimitStore?: RateLimitStore
   /** Chantier 4: Validate required env vars at startup; throws with a clear error on failure. */
   validateEnv?: boolean
-  /** Phase 1.1: Custom API-key store. Defaults to an in-memory store when apikey auth is enabled. */
+  /**
+   * Phase 1.1: explicit API-key store. Takes precedence over `prisma`/auto-detect.
+   * Defaults to `PrismaApiKeyStore` when a Prisma client is detected, otherwise
+   * `MemoryApiKeyStore` in dev/test. In production (`NODE_ENV=production`) the
+   * runtime refuses to fall back to memory — pass an explicit store to opt in.
+   */
   apiKeyStore?: ApiKeyStore
+  /** Phase 1.1: Prisma client to back the API-key store. Auto-wraps in `PrismaApiKeyStore`. */
+  prisma?: PrismaLikeClient
   /** Phase 1.1: Receives bootstrap log lines instead of console.log. Useful in tests. */
   apiKeyBootstrapLogger?: BootstrapLogger
 }
@@ -54,6 +63,13 @@ export interface RuntimeResult {
   testSuite: string
   openApiSpec: OpenAPISpec
   spec: ZeroAPISpec
+  /**
+   * Phase 1.1: resolves once startup tasks (API-key bootstrap against an
+   * external store) complete. Awaiting this before `app.fetch`/`listen` ensures
+   * the bootstrap key is persisted before traffic arrives. With the in-memory
+   * store bootstrap is synchronous and `ready` resolves immediately.
+   */
+  ready: Promise<void>
 }
 
 /**
@@ -86,6 +102,7 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     rateLimitStore,
     validateEnv: doValidateEnv = false,
     apiKeyStore: providedApiKeyStore,
+    prisma,
     apiKeyBootstrapLogger,
   } = options
 
@@ -120,16 +137,19 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     c.json({ status: 'ready', timestamp: new Date().toISOString() })
   )
 
-  // Phase 1.1: real API-key verification — wire a store and bootstrap an initial key
+  // Phase 1.1: real API-key verification — pick a store and bootstrap an initial key
   const apiKeyAuthEnabled =
     spec.auth?.strategy === 'apikey' || spec.auth?.apikey?.enabled === true
   let apiKeyStore: ApiKeyStore | undefined
+  let ready: Promise<void> = Promise.resolve()
+
   if (spec.auth && apiKeyAuthEnabled) {
-    apiKeyStore = providedApiKeyStore ?? new MemoryApiKeyStore()
+    apiKeyStore = resolveApiKeyStore({ providedApiKeyStore, prisma })
+
     if (apiKeyStore instanceof MemoryApiKeyStore) {
       bootstrapMemoryApiKeysSync(spec.auth, apiKeyStore, apiKeyBootstrapLogger)
     } else {
-      void bootstrapApiKeys(spec.auth, apiKeyStore, apiKeyBootstrapLogger)
+      ready = bootstrapApiKeys(spec.auth, apiKeyStore, apiKeyBootstrapLogger).then(() => { /* void */ })
     }
   }
 
@@ -163,5 +183,37 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     testSuite: generateTests(spec),
     openApiSpec,
     spec,
+    ready,
   }
+}
+
+/**
+ * Pick the right ApiKeyStore for the current environment:
+ *
+ *   1. explicit `apiKeyStore` option (any environment)
+ *   2. explicit `prisma` option → wrap in PrismaApiKeyStore
+ *   3. auto-detect Prisma when `DATABASE_URL` is set
+ *   4. dev/test fallback → MemoryApiKeyStore
+ *
+ * In production (`NODE_ENV=production`) step 4 throws instead of silently using
+ * the volatile in-memory store — operators have to opt in explicitly.
+ */
+function resolveApiKeyStore(opts: {
+  providedApiKeyStore?: ApiKeyStore
+  prisma?: PrismaLikeClient
+}): ApiKeyStore {
+  if (opts.providedApiKeyStore) return opts.providedApiKeyStore
+  if (opts.prisma) return new PrismaApiKeyStore(opts.prisma)
+
+  const autodetected = tryAutoLoadPrismaApiKeyStore()
+  if (autodetected) return autodetected
+
+  if (process.env['NODE_ENV'] === 'production') {
+    throw new Error(
+      'ZeroAPI: apikey auth is enabled in production but no Prisma client could be loaded. ' +
+      'Install @prisma/client (with DATABASE_URL set) so the runtime can use PrismaApiKeyStore, ' +
+      'or pass an explicit `apiKeyStore` option. Refusing to start with a volatile in-memory store.',
+    )
+  }
+  return new MemoryApiKeyStore()
 }

@@ -20,9 +20,12 @@ export { generateApiKey, hashApiKey } from './auth/apikey.js'
 export { MemoryApiKeyStore } from './auth/apikey-store.js'
 export { mountApiKeyRoutes } from './auth/apikey-routes.js'
 export { bootstrapMemoryApiKeysSync, bootstrapApiKeys } from './auth/apikey-bootstrap.js'
+export { PrismaApiKeyStore } from './auth/prisma-apikey-store.js'
+export { tryAutoLoadPrismaApiKeyStore } from './auth/apikey-autodetect.js'
 export type { ApiKeyStore, ApiKeyRecord, CreateApiKeyInput } from './auth/apikey-store.js'
 export type { GeneratedApiKey } from './auth/apikey.js'
 export type { BootstrapApiKeyResult, BootstrapLogger } from './auth/apikey-bootstrap.js'
+export type { PrismaLikeClient, PrismaApiKeyDelegate, PrismaApiKeyRow } from './auth/prisma-apikey-store.js'
 
 // ── RBAC ──────────────────────────────────────────────────────────────────────
 export { getEffectiveRoles, extractRoleFromHeader, hasPermission } from './rbac/roles.js'

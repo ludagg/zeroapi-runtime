@@ -33,14 +33,22 @@ function resolveApiKeyHeader(config: GlobalAuthConfig): string {
  * - JWT/Bearer: verifies the token signature when a secret is configured, otherwise
  *   only validates the 3-part token structure.
  * - API key: hashes the incoming key, looks it up in the supplied `ApiKeyStore`,
- *   and timing-safe compares the stored hash. Without a store the middleware falls
- *   back to a no-op length check — present so the legacy code path keeps working
- *   when callers wire the middleware manually; the runtime always provides a store.
+ *   and timing-safe compares the stored hash. A store is **required** when apikey
+ *   auth is active — the constructor throws otherwise, so there is no code path
+ *   that accepts unverified keys.
  */
 export function createAuthMiddleware(
   config: GlobalAuthConfig,
   apiKeyStore?: ApiKeyStore,
 ): MiddlewareHandler {
+  if (isApiKeyStrategy(config) && !apiKeyStore) {
+    throw new AuthError(
+      'apikey auth is enabled but no ApiKeyStore was provided. ' +
+      'Pass `apiKeyStore` to createRuntime, or wire one explicitly when calling createAuthMiddleware. ' +
+      'Refusing to construct a middleware that cannot verify keys.',
+      500,
+    )
+  }
   const apiKeyHeader = resolveApiKeyHeader(config)
 
   return async (c, next) => {
@@ -51,14 +59,8 @@ export function createAuthMiddleware(
       const key = raw.startsWith('ApiKey ') ? raw.slice(7).trim() : raw.trim()
       if (!key) return c.json({ error: 'Invalid API key' }, 401)
 
-      if (!apiKeyStore) {
-        if (key.length < 16) return c.json({ error: 'Invalid API key' }, 401)
-        await next()
-        return
-      }
-
       const incomingHash = hashApiKey(key)
-      const record = await apiKeyStore.findByHash(incomingHash)
+      const record = await apiKeyStore!.findByHash(incomingHash)
       if (!record || record.revoked) {
         return c.json({ error: 'Invalid API key' }, 401)
       }
@@ -69,7 +71,7 @@ export function createAuthMiddleware(
         return c.json({ error: 'Invalid API key' }, 401)
       }
 
-      apiKeyStore.updateLastUsed(record.id, new Date()).catch(() => { /* best-effort */ })
+      apiKeyStore!.updateLastUsed(record.id, new Date()).catch(() => { /* best-effort */ })
       c.set('apiKey', { id: record.id, keyPrefix: record.keyPrefix, name: record.name })
       await next()
       return
