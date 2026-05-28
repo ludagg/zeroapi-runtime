@@ -135,6 +135,13 @@ export type { RedisLike } from './ratelimit/redisStore.js'
 export { validateEnv, assertEnv } from './env/validate.js'
 export type { EnvValidationResult } from './env/validate.js'
 
+// ── Env Management (Phase 3.1) ────────────────────────────────────────────────
+export { getRequiredEnvVars } from './env/aggregate.js'
+export type { AggregatedEnvVar, EnvVarSource } from './env/aggregate.js'
+export { generateEnvExample } from './env/example.js'
+export { validateAndGenerateEnv, getConfigCheck } from './env/boot.js'
+export type { BootEnvOptions, BootEnvResult, ConfigCheck, EnvBootLogger } from './env/boot.js'
+
 // ── Auth Flows (Chantier 5) ───────────────────────────────────────────────────
 export { mountAuthFlows } from './auth/flows/index.js'
 

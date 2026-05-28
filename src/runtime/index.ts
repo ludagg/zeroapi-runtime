@@ -37,6 +37,7 @@ import { generateOpenAPISpec } from '../docs/swagger.js'
 import { mountScalarDocs } from '../docs/scalar.js'
 import { createRequestIdMiddleware } from '../observability/requestId.js'
 import { assertEnv } from '../env/validate.js'
+import { validateAndGenerateEnv, getConfigCheck, type EnvBootLogger } from '../env/boot.js'
 
 export interface RuntimeOptions {
   enableLogging?: boolean
@@ -86,6 +87,8 @@ export interface RuntimeOptions {
   oauthWarningLogger?: OAuthWarningLogger
   /** Phase 1.4: override `fetch` used by OAuth providers (for tests / proxies). */
   oauthFetch?: typeof fetch
+  /** Phase 3.1: receives warnings about missing / auto-generated env vars. Defaults to `console.warn`. */
+  envBootLogger?: EnvBootLogger
 }
 
 export interface RuntimeResult {
@@ -144,10 +147,17 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     oauthStateStore: providedOAuthStateStore,
     oauthWarningLogger,
     oauthFetch,
+    envBootLogger,
   } = options
 
-  // Chantier 4: Fail fast on missing env vars
+  // Chantier 4: Fail fast on missing env vars (legacy spec.requiredEnv)
   if (doValidateEnv) assertEnv(spec)
+
+  // Phase 3.1: walk the env block + implicit feature vars. Generates random
+  // values for `generate: true`, warns in dev, fails in production on missing
+  // required *explicit* vars. Implicit vars stay non-fatal so feature-specific
+  // guards (Prisma autodetect, JWT secret resolution) keep their own errors.
+  validateAndGenerateEnv(spec, envBootLogger ? { log: envBootLogger } : {})
 
   const startTime = Date.now()
   const app   = new Hono()
@@ -163,12 +173,14 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   if (enableLogging)  app.use('*', logger())
 
   // Chantier 2: Health — enhanced with uptime
+  // Phase 3.1: configCheck reports missing required env vars (names only, never values)
   app.get('/health', (c) =>
     c.json({
       status: 'ok',
       name: spec.name,
       version: spec.version,
       uptime: Math.floor((Date.now() - startTime) / 1000),
+      configCheck: getConfigCheck(spec),
     })
   )
 
