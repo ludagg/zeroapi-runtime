@@ -94,7 +94,11 @@ datasource db {
     spec.auth?.strategy === 'apikey' || spec.auth?.apikey?.enabled === true
   const apiKeyModel = apiKeyAuthEnabled ? renderApiKeyModel() : null
 
-  const parts = [header, models, ...joinModels, apiKeyModel].filter(Boolean)
+  // Phase 1.2: JWT user system — emit User + RefreshToken when opted in
+  const jwtUserSystemEnabled = spec.auth?.jwt?.enabled === true
+  const jwtUserModels = jwtUserSystemEnabled ? renderJwtUserModels() : []
+
+  const parts = [header, models, ...joinModels, apiKeyModel, ...jwtUserModels].filter(Boolean)
   return parts.join('\n\n') + '\n'
 }
 
@@ -108,4 +112,30 @@ function renderApiKeyModel(): string {
   lastUsedAt DateTime?
   createdAt  DateTime  @default(now())
 }`
+}
+
+function renderJwtUserModels(): string[] {
+  const userModel = `model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  passwordHash  String
+  salt          String
+  role          String    @default("user")
+  emailVerified Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  refreshTokens RefreshToken[]
+}`
+
+  const refreshTokenModel = `model RefreshToken {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+}`
+
+  return [userModel, refreshTokenModel]
 }

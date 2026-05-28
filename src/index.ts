@@ -27,6 +27,33 @@ export type { GeneratedApiKey } from './auth/apikey.js'
 export type { BootstrapApiKeyResult, BootstrapLogger } from './auth/apikey-bootstrap.js'
 export type { PrismaLikeClient, PrismaApiKeyDelegate, PrismaApiKeyRow } from './auth/prisma-apikey-store.js'
 
+// ── JWT user system (Phase 1.2) ───────────────────────────────────────────────
+export { hashPassword, verifyPassword } from './auth/password.js'
+export {
+  generateAccessToken, verifyAccessToken,
+  generateRefreshTokenValue, hashRefreshToken,
+  parseTTL, getAccessTokenTTL, getRefreshTokenTTL,
+  resolveJwtSecret, getJwtSecretEnvName,
+} from './auth/jwt.js'
+export { MemoryUserStore } from './auth/user-store.js'
+export { MemoryRefreshTokenStore } from './auth/refresh-token-store.js'
+export { PrismaUserStore } from './auth/prisma-user-store.js'
+export { PrismaRefreshTokenStore } from './auth/prisma-refresh-token-store.js'
+export { tryAutoLoadPrismaJwtStores } from './auth/jwt-autodetect.js'
+export { mountJwtAuthRoutes } from './auth/jwt-routes.js'
+export type { PasswordHash } from './auth/password.js'
+export type { JwtPayload, JwtSecretLogger } from './auth/jwt.js'
+export type { UserStore, UserRecord, CreateUserInput } from './auth/user-store.js'
+export type {
+  RefreshTokenStore, RefreshTokenRecord, CreateRefreshTokenInput,
+} from './auth/refresh-token-store.js'
+export type {
+  PrismaUserLikeClient, PrismaUserDelegate, PrismaUserRow,
+} from './auth/prisma-user-store.js'
+export type {
+  PrismaRefreshTokenLikeClient, PrismaRefreshTokenDelegate, PrismaRefreshTokenRow,
+} from './auth/prisma-refresh-token-store.js'
+
 // ── RBAC ──────────────────────────────────────────────────────────────────────
 export { getEffectiveRoles, extractRoleFromHeader, hasPermission } from './rbac/roles.js'
 export { createPermissionMiddleware } from './rbac/permissions.js'
