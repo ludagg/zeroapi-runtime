@@ -25,6 +25,10 @@ import { PrismaRefreshTokenStore, type PrismaRefreshTokenLikeClient } from '../a
 import { tryAutoLoadPrismaJwtStores } from '../auth/jwt-autodetect.js'
 import { mountJwtAuthRoutes } from '../auth/jwt-routes.js'
 import { resolveJwtSecret, type JwtSecretLogger } from '../auth/jwt.js'
+import { MemoryOAuthAccountStore, type OAuthAccountStore } from '../auth/oauth-account-store.js'
+import { MemoryOAuthStateStore, type OAuthStateStore } from '../auth/oauth-state.js'
+import { mountOAuthRoutes } from '../auth/oauth-routes.js'
+import { resolveOAuthBaseUrl, type OAuthWarningLogger } from '../auth/oauth-config.js'
 import { createHelmetMiddleware } from '../security/helmet.js'
 import { createCorsMiddleware } from '../security/cors.js'
 import { createRateLimitMiddleware } from '../security/ratelimit.js'
@@ -74,6 +78,14 @@ export interface RuntimeOptions {
   prismaJwt?: PrismaUserLikeClient & PrismaRefreshTokenLikeClient
   /** Phase 1.2: receives the JWT secret warning when an ephemeral secret is used in dev. */
   jwtSecretLogger?: JwtSecretLogger
+  /** Phase 1.4: explicit OAuth account-link store. Defaults to in-memory. */
+  oauthAccountStore?: OAuthAccountStore
+  /** Phase 1.4: explicit OAuth CSRF-state store. Defaults to in-memory. */
+  oauthStateStore?: OAuthStateStore
+  /** Phase 1.4: receives warnings when OAUTH_CALLBACK_BASE_URL is missing. */
+  oauthWarningLogger?: OAuthWarningLogger
+  /** Phase 1.4: override `fetch` used by OAuth providers (for tests / proxies). */
+  oauthFetch?: typeof fetch
 }
 
 export interface RuntimeResult {
@@ -128,6 +140,10 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     refreshTokenStore: providedRefreshTokenStore,
     prismaJwt,
     jwtSecretLogger,
+    oauthAccountStore: providedOAuthAccountStore,
+    oauthStateStore: providedOAuthStateStore,
+    oauthWarningLogger,
+    oauthFetch,
   } = options
 
   // Chantier 4: Fail fast on missing env vars
@@ -204,6 +220,22 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   // Phase 1.2: JWT user routes — must mount BEFORE generateRoutes so /auth/* paths win
   if (spec.auth && jwtUserSystemEnabled && jwtSecret && userStore && refreshTokenStore) {
     mountJwtAuthRoutes(app, spec.auth, jwtSecret, userStore, refreshTokenStore)
+  }
+
+  // Phase 1.4: OAuth routes — same constraint (mount before generateRoutes).
+  const oauthEnabled = (spec.auth?.oauth?.providers?.length ?? 0) > 0
+  if (
+    spec.auth && oauthEnabled && jwtUserSystemEnabled &&
+    jwtSecret && userStore && refreshTokenStore
+  ) {
+    const oauthAccountStore = providedOAuthAccountStore ?? new MemoryOAuthAccountStore()
+    const oauthStateStore = providedOAuthStateStore ?? new MemoryOAuthStateStore()
+    const baseUrl = resolveOAuthBaseUrl(spec.auth, oauthWarningLogger)
+    mountOAuthRoutes(
+      app, spec.auth, jwtSecret, userStore, refreshTokenStore,
+      oauthAccountStore, oauthStateStore,
+      { ...(baseUrl !== undefined ? { baseUrl } : {}), ...(oauthFetch ? { fetchImpl: oauthFetch } : {}) },
+    )
   }
 
   // Chantier 1: Routes with hooks + custom endpoints

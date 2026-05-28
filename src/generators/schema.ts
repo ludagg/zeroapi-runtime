@@ -118,12 +118,15 @@ datasource db {
 
   // Phase 1.2: JWT user system — emit User + RefreshToken when opted in.
   // Phase 1.3: extend User with back-relations for each ownOnly-owned resource.
+  // Phase 1.4: extend User with `oauthAccounts` back-relation when OAuth is configured.
   const jwtUserSystemEnabled = spec.auth?.jwt?.enabled === true
+  const oauthEnabled = (spec.auth?.oauth?.providers?.length ?? 0) > 0
   const jwtUserModels = jwtUserSystemEnabled
-    ? renderJwtUserModels(ownedResources.map((r) => r.name))
+    ? renderJwtUserModels(ownedResources.map((r) => r.name), oauthEnabled)
     : []
+  const oauthModel = oauthEnabled ? renderOAuthAccountModel() : null
 
-  const parts = [header, models, ...joinModels, apiKeyModel, ...jwtUserModels].filter(Boolean)
+  const parts = [header, models, ...joinModels, apiKeyModel, ...jwtUserModels, oauthModel].filter(Boolean)
   return parts.join('\n\n') + '\n'
 }
 
@@ -140,13 +143,17 @@ function renderApiKeyModel(): string {
 }`
 }
 
-function renderJwtUserModels(ownedResourceNames: string[]): string[] {
-  const ownedLines = ownedResourceNames.map((name) => {
+function renderJwtUserModels(ownedResourceNames: string[], includeOAuth: boolean): string[] {
+  const extraLines: string[] = []
+  if (includeOAuth) {
+    extraLines.push(`  oauthAccounts OAuthAccount[]`)
+  }
+  for (const name of ownedResourceNames) {
     const modelName = name.charAt(0).toUpperCase() + name.slice(1)
     // Field name is the lower-cased plural model name to avoid collisions with refreshTokens.
     const field = `owned${modelName}s`
-    return `  ${field.padEnd(13)} ${modelName}[]`
-  })
+    extraLines.push(`  ${field.padEnd(13)} ${modelName}[]`)
+  }
 
   const userModel = `model User {
   id            String    @id @default(uuid())
@@ -157,7 +164,7 @@ function renderJwtUserModels(ownedResourceNames: string[]): string[] {
   emailVerified Boolean   @default(false)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
-  refreshTokens RefreshToken[]${ownedLines.length > 0 ? '\n' + ownedLines.join('\n') : ''}
+  refreshTokens RefreshToken[]${extraLines.length > 0 ? '\n' + extraLines.join('\n') : ''}
 }`
 
   const refreshTokenModel = `model RefreshToken {
@@ -171,4 +178,16 @@ function renderJwtUserModels(ownedResourceNames: string[]): string[] {
 }`
 
   return [userModel, refreshTokenModel]
+}
+
+function renderOAuthAccountModel(): string {
+  return `model OAuthAccount {
+  id         String   @id @default(uuid())
+  provider   String
+  providerId String
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  @@unique([provider, providerId])
+}`
 }
