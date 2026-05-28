@@ -7,6 +7,7 @@ export { generatePrismaSchema } from './generators/schema.js'
 export { generateZodSchemas } from './generators/validation.js'
 export { generateTests } from './generators/tests.js'
 export { generateRoutes } from './generators/routes.js'
+export { generateSdk } from './sdk/generate.js'
 
 // ── Security ──────────────────────────────────────────────────────────────────
 export { createHelmetMiddleware } from './security/helmet.js'
