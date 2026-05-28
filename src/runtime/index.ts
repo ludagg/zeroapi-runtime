@@ -48,6 +48,9 @@ import {
   type WebhookStore, type WebhookWorkerOptions, type InboundSourceConfig,
   type InboundRoutesOptions,
 } from '../webhooks/index.js'
+import {
+  cascadeSystemResourceDelete, type SystemResourceResolvers, type CascadeResult,
+} from '../relations/index.js'
 
 export interface RuntimeOptions {
   enableLogging?: boolean
@@ -146,6 +149,14 @@ export interface RuntimeResult {
     store: WebhookStore
     worker: WebhookWorker
   }
+  /**
+   * Delete a system-resource row (currently only "User") and apply the
+   * `onDelete` policy declared by every user-defined relation that points at
+   * it: Cascade deletes children, SetNull clears the FK, Restrict throws.
+   *
+   * Only available when the matching auth feature is active (e.g. auth.jwt).
+   */
+  deleteSystemResource?: (resource: string, id: string) => Promise<CascadeResult>
 }
 
 /**
@@ -346,8 +357,27 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     webhooks = { store: wStore, worker: wWorker }
   }
 
+  // Phase 2.2: system-resource resolvers for `?include=user` etc.
+  // Backed by the same UserStore that powers /auth/me, with sensitive fields
+  // (passwordHash, salt) projected out by `applyIncludes`.
+  const systemResolvers: SystemResourceResolvers = {}
+  if (userStore) {
+    systemResolvers['user'] = async (id: string) => {
+      const row = await userStore.findById(id)
+      if (!row) return null
+      return {
+        id: row.id,
+        email: row.email,
+        role: row.role,
+        emailVerified: row.emailVerified,
+        createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
+        updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
+      }
+    }
+  }
+
   // Chantier 1: Routes with hooks + custom endpoints
-  generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers, webhookEmitter)
+  generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers, webhookEmitter, systemResolvers)
 
   // Chantier 5: Legacy auth flows — only when the new JWT user system is off,
   // since both register the same /auth/* paths.
@@ -363,6 +393,25 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   const openApiSpec = generateOpenAPISpec(spec)
   if (enableDocs) mountScalarDocs(app, openApiSpec)
 
+  // Phase 2.2: cascade-aware delete for system resources. Walks user-defined
+  // relations and enforces onDelete (Cascade / SetNull / Restrict) before
+  // removing the system row itself.
+  const userStoreRef = userStore
+  const deleteSystemResource = userStoreRef
+    ? async (name: string, id: string): Promise<CascadeResult> => {
+        if (name !== 'User') {
+          throw new Error(`deleteSystemResource: "${name}" is not supported (only "User")`)
+        }
+        // Restrict checks run first inside cascadeSystemResourceDelete — it
+        // throws before mutating anything if any FK is restricted.
+        const result = cascadeSystemResourceDelete(spec, store, 'User', id)
+        if ('delete' in userStoreRef && typeof (userStoreRef as { delete?: unknown }).delete === 'function') {
+          await (userStoreRef as { delete: (id: string) => Promise<boolean> }).delete(id)
+        }
+        return result
+      }
+    : undefined
+
   return {
     app,
     prismaSchema: generatePrismaSchema(spec),
@@ -372,6 +421,7 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     spec,
     ready,
     ...(webhooks ? { webhooks } : {}),
+    ...(deleteSystemResource ? { deleteSystemResource } : {}),
   }
 }
 

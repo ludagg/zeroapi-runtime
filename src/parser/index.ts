@@ -1,6 +1,10 @@
 import { z } from 'zod'
 import type { ZeroAPISpec, ResourceDefinition } from '../types/spec.js'
-import { normalizeTopLevelRelations } from '../relations/index.js'
+import {
+  normalizeTopLevelRelations,
+  isSystemResourceName,
+  isSystemResourceActive,
+} from '../relations/index.js'
 
 // ── Field ─────────────────────────────────────────────────────────────────────
 
@@ -271,14 +275,27 @@ const ZeroAPISpecSchema = z.object({
 
 // ── Relation semantic validation ──────────────────────────────────────────────
 
-function validateRelations(resources: ResourceDefinition[]): string | null {
+function validateRelations(spec: ZeroAPISpec): string | null {
+  const resources = spec.resources
   const names = new Set(resources.map((r) => r.name))
   const throughNames = new Set<string>()
 
   for (const resource of resources) {
     for (const rel of resource.relations ?? []) {
       if (!names.has(rel.resource)) {
-        return `Resource "${resource.name}" has relation to unknown resource "${rel.resource}"`
+        if (isSystemResourceName(rel.resource)) {
+          if (!isSystemResourceActive(spec, rel.resource)) {
+            return `Resource "${resource.name}" has relation to system resource "${rel.resource}" but the matching auth feature is not enabled`
+          }
+          // System target — only manyToOne / oneToOne are supported from
+          // user-defined resources (no system-side endpoints to expose
+          // oneToMany / manyToMany from).
+          if (rel.type !== 'manyToOne' && rel.type !== 'oneToOne') {
+            return `Resource "${resource.name}" has ${rel.type} relation to system resource "${rel.resource}" — only manyToOne or oneToOne are supported for system targets`
+          }
+        } else {
+          return `Resource "${resource.name}" has relation to unknown resource "${rel.resource}"`
+        }
       }
       if (rel.type === 'manyToMany' && !rel.through) {
         return `manyToMany relation in "${resource.name}" → "${rel.resource}" requires a "through" field`
@@ -340,10 +357,21 @@ function validateSpecLevelBlocks(spec: ZeroAPISpec): string | null {
 
   for (const rel of spec.relations ?? []) {
     if (!names.has(rel.from)) {
+      // `from` must always be a user-defined resource — the top-level shape
+      // declares the relation from the FK-owning side.
       return `Top-level relation references unknown resource "${rel.from}" in "from"`
     }
     if (!names.has(rel.to)) {
-      return `Top-level relation "${rel.from}" → "${rel.to}" references unknown resource "${rel.to}"`
+      if (isSystemResourceName(rel.to)) {
+        if (!isSystemResourceActive(spec, rel.to)) {
+          return `Top-level relation "${rel.from}" → "${rel.to}" references system resource "${rel.to}" but the matching auth feature is not enabled`
+        }
+        if (rel.type !== 'many-to-one' && rel.type !== 'one-to-one') {
+          return `Top-level relation "${rel.from}" → "${rel.to}" uses ${rel.type} but only many-to-one / one-to-one are supported for system targets`
+        }
+      } else {
+        return `Top-level relation "${rel.from}" → "${rel.to}" references unknown resource "${rel.to}"`
+      }
     }
     if (rel.type === 'many-to-many' && !rel.through) {
       return `Top-level many-to-many relation "${rel.from}" → "${rel.to}" requires a "through" field`
@@ -445,7 +473,7 @@ export function parseSpec(raw: unknown): ZeroAPISpec {
   // nested routes, memory joins) all read from one shape.
   const spec = normalizeTopLevelRelations(rawSpec)
 
-  const relError = validateRelations(spec.resources)
+  const relError = validateRelations(spec)
   if (relError) {
     const relZodError = new z.ZodError([
       { code: z.ZodIssueCode.custom, message: relError, path: ['resources'] },
