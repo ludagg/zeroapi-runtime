@@ -105,6 +105,7 @@ const ResourceDefinitionSchema = z.object({
 // ── Global config ─────────────────────────────────────────────────────────────
 
 const JwtAuthConfigSchema = z.object({
+  enabled: z.boolean().optional(),
   accessTokenTTL: z.string().optional(),
   refreshTokenTTL: z.string().optional(),
   secretEnv: z.string().optional(),
@@ -325,6 +326,15 @@ function validateSpecLevelBlocks(spec: ZeroAPISpec): string | null {
   for (const perm of spec.permissions ?? []) {
     if (!names.has(perm.resource)) {
       return `Permission rule references unknown resource "${perm.resource}"`
+    }
+  }
+
+  // Phase 1.2: when JWT user system is on, "User" and "RefreshToken" are reserved
+  if (spec.auth?.jwt?.enabled === true) {
+    for (const reserved of ['User', 'RefreshToken']) {
+      if (names.has(reserved)) {
+        return `Resource name "${reserved}" is reserved when auth.jwt.enabled is true — rename the resource or disable auth.jwt`
+      }
     }
   }
 

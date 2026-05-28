@@ -18,6 +18,13 @@ import { mountApiKeyRoutes } from '../auth/apikey-routes.js'
 import { bootstrapMemoryApiKeysSync, bootstrapApiKeys, type BootstrapLogger } from '../auth/apikey-bootstrap.js'
 import { PrismaApiKeyStore, type PrismaLikeClient } from '../auth/prisma-apikey-store.js'
 import { tryAutoLoadPrismaApiKeyStore } from '../auth/apikey-autodetect.js'
+import { MemoryUserStore, type UserStore } from '../auth/user-store.js'
+import { MemoryRefreshTokenStore, type RefreshTokenStore } from '../auth/refresh-token-store.js'
+import { PrismaUserStore, type PrismaUserLikeClient } from '../auth/prisma-user-store.js'
+import { PrismaRefreshTokenStore, type PrismaRefreshTokenLikeClient } from '../auth/prisma-refresh-token-store.js'
+import { tryAutoLoadPrismaJwtStores } from '../auth/jwt-autodetect.js'
+import { mountJwtAuthRoutes } from '../auth/jwt-routes.js'
+import { resolveJwtSecret, type JwtSecretLogger } from '../auth/jwt.js'
 import { createHelmetMiddleware } from '../security/helmet.js'
 import { createCorsMiddleware } from '../security/cors.js'
 import { createRateLimitMiddleware } from '../security/ratelimit.js'
@@ -54,6 +61,19 @@ export interface RuntimeOptions {
   prisma?: PrismaLikeClient
   /** Phase 1.1: Receives bootstrap log lines instead of console.log. Useful in tests. */
   apiKeyBootstrapLogger?: BootstrapLogger
+  /**
+   * Phase 1.2: explicit user store for the JWT user system. Takes precedence over
+   * `prisma`/auto-detect. Defaults to `PrismaUserStore` when a Prisma client is
+   * detected, otherwise `MemoryUserStore` in dev/test. Production refuses the
+   * memory fallback — pass an explicit store to opt in.
+   */
+  userStore?: UserStore
+  /** Phase 1.2: explicit refresh-token store. Same resolution rules as `userStore`. */
+  refreshTokenStore?: RefreshTokenStore
+  /** Phase 1.2: Prisma client to back the user / refresh-token stores. */
+  prismaJwt?: PrismaUserLikeClient & PrismaRefreshTokenLikeClient
+  /** Phase 1.2: receives the JWT secret warning when an ephemeral secret is used in dev. */
+  jwtSecretLogger?: JwtSecretLogger
 }
 
 export interface RuntimeResult {
@@ -104,6 +124,10 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     apiKeyStore: providedApiKeyStore,
     prisma,
     apiKeyBootstrapLogger,
+    userStore: providedUserStore,
+    refreshTokenStore: providedRefreshTokenStore,
+    prismaJwt,
+    jwtSecretLogger,
   } = options
 
   // Chantier 4: Fail fast on missing env vars
@@ -153,18 +177,41 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     }
   }
 
-  const authMiddleware = spec.auth ? createAuthMiddleware(spec.auth, apiKeyStore) : undefined
+  // Phase 1.2: JWT user system — resolve secret + stores, then mount routes
+  const jwtUserSystemEnabled = spec.auth?.jwt?.enabled === true
+  let jwtSecret: string | undefined
+  let userStore: UserStore | undefined
+  let refreshTokenStore: RefreshTokenStore | undefined
+
+  if (spec.auth && jwtUserSystemEnabled) {
+    jwtSecret = resolveJwtSecret(spec.auth, jwtSecretLogger)
+    const resolved = resolveJwtStores({
+      providedUserStore,
+      providedRefreshTokenStore,
+      prismaJwt,
+    })
+    userStore = resolved.userStore
+    refreshTokenStore = resolved.refreshTokenStore
+  }
+
+  const authMiddleware = spec.auth ? createAuthMiddleware(spec.auth, apiKeyStore, jwtSecret) : undefined
 
   // Phase 1.1: admin routes for managing API keys (protected by the auth middleware itself)
   if (spec.auth && apiKeyStore && authMiddleware) {
     mountApiKeyRoutes(app, spec.auth, apiKeyStore, authMiddleware)
   }
 
+  // Phase 1.2: JWT user routes — must mount BEFORE generateRoutes so /auth/* paths win
+  if (spec.auth && jwtUserSystemEnabled && jwtSecret && userStore && refreshTokenStore) {
+    mountJwtAuthRoutes(app, spec.auth, jwtSecret, userStore, refreshTokenStore)
+  }
+
   // Chantier 1: Routes with hooks + custom endpoints
   generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers)
 
-  // Chantier 5: Auth flows (register/login/verify/reset/refresh/logout)
-  if (spec.authFlows) {
+  // Chantier 5: Legacy auth flows — only when the new JWT user system is off,
+  // since both register the same /auth/* paths.
+  if (spec.authFlows && !jwtUserSystemEnabled) {
     mountAuthFlows(app, spec)
   }
 
@@ -216,4 +263,51 @@ function resolveApiKeyStore(opts: {
     )
   }
   return new MemoryApiKeyStore()
+}
+
+/**
+ * Same fallback ladder as `resolveApiKeyStore`, but for the JWT user system —
+ * explicit stores → `prismaJwt` client → auto-detected Prisma → in-memory.
+ * Production refuses the memory fallback unless an explicit store was passed.
+ */
+function resolveJwtStores(opts: {
+  providedUserStore?: UserStore
+  providedRefreshTokenStore?: RefreshTokenStore
+  prismaJwt?: PrismaUserLikeClient & PrismaRefreshTokenLikeClient
+}): { userStore: UserStore; refreshTokenStore: RefreshTokenStore } {
+  if (opts.providedUserStore && opts.providedRefreshTokenStore) {
+    return {
+      userStore: opts.providedUserStore,
+      refreshTokenStore: opts.providedRefreshTokenStore,
+    }
+  }
+
+  if (opts.prismaJwt) {
+    return {
+      userStore: opts.providedUserStore ?? new PrismaUserStore(opts.prismaJwt),
+      refreshTokenStore:
+        opts.providedRefreshTokenStore ?? new PrismaRefreshTokenStore(opts.prismaJwt),
+    }
+  }
+
+  const autodetected = tryAutoLoadPrismaJwtStores()
+  if (autodetected) {
+    return {
+      userStore: opts.providedUserStore ?? autodetected.userStore,
+      refreshTokenStore: opts.providedRefreshTokenStore ?? autodetected.refreshTokenStore,
+    }
+  }
+
+  if (process.env['NODE_ENV'] === 'production') {
+    throw new Error(
+      'ZeroAPI: auth.jwt is enabled in production but no Prisma client could be loaded. ' +
+      'Install @prisma/client (with DATABASE_URL set) so the runtime can use PrismaUserStore + PrismaRefreshTokenStore, ' +
+      'or pass explicit `userStore` and `refreshTokenStore` options. Refusing to start with volatile in-memory stores.',
+    )
+  }
+
+  return {
+    userStore: opts.providedUserStore ?? new MemoryUserStore(),
+    refreshTokenStore: opts.providedRefreshTokenStore ?? new MemoryRefreshTokenStore(),
+  }
 }

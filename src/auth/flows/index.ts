@@ -1,8 +1,9 @@
-import { randomBytes, pbkdf2Sync } from 'crypto'
+import { randomBytes } from 'crypto'
 import type { Hono } from 'hono'
 import { sign } from 'hono/jwt'
 import type { ZeroAPISpec } from '../../types/spec.js'
 import type { AuthFlowsConfig, LockoutConfig } from '../../types/spec.js'
+import { hashPassword, verifyPassword } from '../password.js'
 
 // ── Internal user store ───────────────────────────────────────────────────────
 
@@ -23,17 +24,6 @@ interface AuthUser {
 }
 
 // ── Crypto helpers ────────────────────────────────────────────────────────────
-
-function hashPassword(password: string, salt?: string): { hash: string; salt: string } {
-  const s = salt ?? randomBytes(16).toString('hex')
-  const hash = pbkdf2Sync(password, s, 100_000, 64, 'sha512').toString('hex')
-  return { hash, salt: s }
-}
-
-function verifyPassword(password: string, hash: string, salt: string): boolean {
-  const { hash: attempt } = hashPassword(password, salt)
-  return attempt === hash
-}
 
 function generateToken(): string {
   return randomBytes(32).toString('hex')

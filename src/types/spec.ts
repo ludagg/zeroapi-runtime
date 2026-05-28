@@ -148,6 +148,8 @@ export interface ResourceDefinition {
  * All fields are optional at the type level; the parser fills defaults.
  */
 export interface JwtAuthConfig {
+  /** Phase 1.2: opt-in flag that activates the JWT user system (register/login/refresh/me). */
+  enabled?: boolean
   accessTokenTTL?: string
   refreshTokenTTL?: string
   secretEnv?: string
