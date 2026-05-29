@@ -111,111 +111,323 @@ function owningRelations(resource: ResourceDefinition): RelationDefinition[] {
   )
 }
 
-/**
- * Counts, per target model, how many owning-side relations a resource has.
- * A target reached more than once is "ambiguous" — every relation to it must
- * carry an explicit, matching `@relation("…")` name on both sides.
- */
-function owningTargetCounts(resource: ResourceDefinition): Map<string, number> {
-  const counts = new Map<string, number>()
-  for (const rel of owningRelations(resource)) {
-    counts.set(rel.resource, (counts.get(rel.resource) ?? 0) + 1)
-  }
-  return counts
+/** PascalCase a single resource name (first letter upper). */
+function pascalName(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1)
 }
 
+/**
+ * Relation-field "base" derived directly from a FK column name (e.g. `buyerId`
+ * → `buyer`, `category_id` → `category`). Falls back to the supplied lowercased
+ * target name when the column carries no usable stem (e.g. `id`).
+ */
+function baseFromFk(fk: string, fallbackLower: string): string {
+  const base = fk.replace(/_?[iI][dD]$/, '')
+  return base.length > 0 ? base : fallbackLower
+}
+
+/**
+ * Back-relation array field name for an owner model (the model that holds the
+ * FK): a lightly-pluralised, camelCase form of the owner name. `Order` →
+ * `orders`, `OrderItem` → `orderItems`, `Category` → `categories`.
+ */
+function backArrayField(owner: string): string {
+  const lower = owner.charAt(0).toLowerCase() + owner.slice(1)
+  if (lower.endsWith('s')) return lower
+  if (lower.endsWith('y')) return lower.slice(0, -1) + 'ies'
+  return lower + 's'
+}
+
+// ── General relation graph (the single source of truth for the schema) ─────────
+
+/**
+ * A single owning-side FK relation: `owner` holds the column `fk` that points
+ * at `target`. Every Prisma relation in the generated schema reduces to one of
+ * these — a manyToOne / oneToOne FK, the child side synthesised for a
+ * oneToMany, or the two endpoints of a manyToMany join table. Modelling them
+ * uniformly is what makes ambiguity detection systematic rather than ad-hoc.
+ */
+interface OwnedLink {
+  owner: string
+  target: string
+  fk: string
+  /** Stem used to build unique field / @relation names when disambiguating. */
+  fieldHint: string
+  onDelete?: RelationDefinition['onDelete']
+  required: boolean
+  unique: boolean
+  isSelf: boolean
+}
+
+/** The complete relation rendering for a spec, derived from the link graph. */
+export interface RelationRenderPlan {
+  /** Relation lines (FK + object + back-array fields) per PascalCase model. */
+  linesByModel: Map<string, string[]>
+  /** Trailing block lines (e.g. composite `@@unique`) per PascalCase model. */
+  extrasByModel: Map<string, string[]>
+  /** FK column names a model owns — excluded from its plain field rendering. */
+  fkColumnsByModel: Map<string, Set<string>>
+  /** Standalone join models to emit (manyToMany `through` not a user resource). */
+  createdJoinModels: string[]
+}
+
+const JOIN_FIELD_TYPE_MAP: Record<string, string> = {
+  string: 'String', text: 'String', email: 'String', url: 'String', uuid: 'String',
+  number: 'Float', integer: 'Int', decimal: 'Decimal', boolean: 'Boolean',
+  date: 'DateTime', datetime: 'DateTime', file: 'String', 'file[]': 'String',
+  json: 'Json', enum: 'String',
+}
+
+/**
+ * Builds the relation rendering plan for a whole spec.
+ *
+ * The algorithm is deliberately general:
+ *   1. Reduce every declared relation to a set of owning FK links, de-duplicated
+ *      by `owner::fk`. This collapses redundant declarations — e.g. a
+ *      many-to-many through `OrderItem` AND a direct `Product → OrderItem`
+ *      relation describe the SAME `OrderItem.productId` link and must not emit
+ *      two separate back-relations.
+ *   2. Count links per unordered model pair. Any pair connected by more than one
+ *      link is ambiguous: every link in it gets an explicit, matching
+ *      `@relation("…")` name on both sides (this covers multi-FK-to-User,
+ *      self relations, m2m-through + direct relation, and any future shape).
+ *   3. Render each link's owner-side field(s) and, when the target is a
+ *      user-defined model, its back-relation array — naming both sides
+ *      identically when the pair is ambiguous.
+ */
+export function planResourceRelations(resources: ResourceDefinition[]): RelationRenderPlan {
+  const userNames = new Set(resources.map((r) => pascalName(r.name)))
+  const byPascal = new Map(resources.map((r) => [pascalName(r.name), r]))
+
+  const links: OwnedLink[] = []
+  const linkIndex = new Map<string, OwnedLink>()
+  const addLink = (link: OwnedLink): void => {
+    const key = `${link.owner}::${link.fk}`
+    const existing = linkIndex.get(key)
+    if (existing) {
+      // Same FK reached from two declarations (e.g. m2m + direct relation): keep
+      // one link, preferring the stronger constraints.
+      if (!existing.onDelete && link.onDelete) existing.onDelete = link.onDelete
+      existing.required = existing.required || link.required
+      existing.unique = existing.unique || link.unique
+      return
+    }
+    linkIndex.set(key, link)
+    links.push(link)
+  }
+  const hasOwningTo = (res: ResourceDefinition | undefined, targetPascal: string): boolean =>
+    (res?.relations ?? []).some(
+      (r) => (r.type === 'manyToOne' || r.type === 'oneToOne') && pascalName(r.resource) === targetPascal,
+    )
+  const owningFkTo = (res: ResourceDefinition | undefined, targetPascal: string): string | undefined => {
+    const r = (res?.relations ?? []).find(
+      (x) => (x.type === 'manyToOne' || x.type === 'oneToOne') && pascalName(x.resource) === targetPascal,
+    )
+    return r ? fkFieldOf(r) : undefined
+  }
+
+  const extrasByModel = new Map<string, string[]>()
+  const addExtra = (model: string, line: string): void => {
+    const arr = extrasByModel.get(model) ?? []
+    arr.push(line)
+    extrasByModel.set(model, arr)
+  }
+  const createdJoinModels: string[] = []
+  const seenThrough = new Set<string>()
+
+  // ── 1a. Direct owning relations + synthesised oneToMany children ────────────
+  for (const resource of resources) {
+    const owner = pascalName(resource.name)
+    for (const rel of resource.relations ?? []) {
+      const target = pascalName(rel.resource)
+      if (rel.type === 'manyToOne' || rel.type === 'oneToOne') {
+        const fk = fkFieldOf(rel)
+        addLink({
+          owner, target, fk,
+          fieldHint: baseFromFk(fk, rel.resource.toLowerCase()),
+          onDelete: rel.onDelete,
+          required: !!rel.required,
+          unique: rel.type === 'oneToOne',
+          isSelf: target === owner,
+        })
+      } else if (rel.type === 'oneToMany' && target !== owner) {
+        // The FK lives on the child. Synthesise it only when the child does not
+        // already declare an owning relation back (which would be the same link).
+        const child = byPascal.get(target)
+        if (!hasOwningTo(child, owner)) {
+          const fk = `${resource.name.toLowerCase()}Id`
+          addLink({
+            owner: target, target: owner, fk,
+            fieldHint: baseFromFk(fk, resource.name.toLowerCase()),
+            required: false, unique: false, isSelf: false,
+          })
+        }
+      }
+    }
+  }
+
+  // ── 1b. Self oneToMany declared alone → synthesise the owning self link ─────
+  for (const resource of resources) {
+    const model = pascalName(resource.name)
+    const hasSelfOneToMany = (resource.relations ?? []).some(
+      (r) => r.type === 'oneToMany' && pascalName(r.resource) === model,
+    )
+    const hasOwningSelf = (resource.relations ?? []).some(
+      (r) => (r.type === 'manyToOne' || r.type === 'oneToOne') && pascalName(r.resource) === model,
+    )
+    if (hasSelfOneToMany && !hasOwningSelf) {
+      addLink({
+        owner: model, target: model, fk: 'parentId',
+        fieldHint: 'parent', required: false, unique: false, isSelf: true,
+      })
+    }
+  }
+
+  // ── 1c. manyToMany join tables ──────────────────────────────────────────────
+  for (const resource of resources) {
+    for (const rel of resource.relations ?? []) {
+      if (rel.type !== 'manyToMany' || !rel.through) continue
+      if (seenThrough.has(rel.through)) continue
+      seenThrough.add(rel.through)
+
+      const thisModel = pascalName(resource.name)
+      const otherModel = pascalName(rel.resource)
+      const joinModel = snakeToPascal(rel.through)
+      const thisFkDefault = `${resource.name.toLowerCase()}Id`
+      const otherFkDefault = `${rel.resource.toLowerCase()}Id`
+
+      if (userNames.has(joinModel)) {
+        // The join table is itself a user resource (e.g. OrderItem with its own
+        // payload). It owns one FK link to each endpoint; these de-duplicate
+        // with any direct relation the resource already declares.
+        const joinRes = byPascal.get(joinModel)
+        const thisFk = owningFkTo(joinRes, thisModel) ?? thisFkDefault
+        const otherFk = owningFkTo(joinRes, otherModel) ?? otherFkDefault
+        addLink({
+          owner: joinModel, target: thisModel, fk: thisFk,
+          fieldHint: baseFromFk(thisFk, resource.name.toLowerCase()),
+          onDelete: rel.onDelete, required: true, unique: false,
+          isSelf: joinModel === thisModel,
+        })
+        addLink({
+          owner: joinModel, target: otherModel, fk: otherFk,
+          fieldHint: baseFromFk(otherFk, rel.resource.toLowerCase()),
+          onDelete: rel.onDelete, required: true, unique: false,
+          isSelf: joinModel === otherModel,
+        })
+        addExtra(joinModel, `  @@unique([${thisFk}, ${otherFk}])`)
+      } else {
+        // Synthetic join model. Its two FK links only drive the back-relation
+        // arrays on the endpoints; the model itself is rendered standalone.
+        addLink({
+          owner: joinModel, target: thisModel, fk: thisFkDefault,
+          fieldHint: baseFromFk(thisFkDefault, resource.name.toLowerCase()),
+          onDelete: rel.onDelete, required: true, unique: false, isSelf: false,
+        })
+        addLink({
+          owner: joinModel, target: otherModel, fk: otherFkDefault,
+          fieldHint: baseFromFk(otherFkDefault, rel.resource.toLowerCase()),
+          onDelete: rel.onDelete, required: true, unique: false, isSelf: false,
+        })
+        const onDelete = rel.onDelete ? `, onDelete: ${rel.onDelete}` : ''
+        const extraFields = Object.entries(rel.fields ?? {}).map(([name, field]) => {
+          const prismaType = JOIN_FIELD_TYPE_MAP[field.type] ?? 'String'
+          const opt = field.required ? '' : '?'
+          return `  ${padFieldName(name)}${prismaType}${opt}`
+        })
+        createdJoinModels.push(
+          `model ${joinModel} {\n` +
+          `  ${padFieldName(thisFkDefault)}String\n` +
+          `  ${padFieldName(otherFkDefault)}String\n` +
+          (extraFields.length ? extraFields.join('\n') + '\n' : '') +
+          `  ${padFieldName(resource.name.toLowerCase())}${thisModel}  @relation(fields: [${thisFkDefault}], references: [id]${onDelete})\n` +
+          `  ${padFieldName(rel.resource.toLowerCase())}${otherModel}  @relation(fields: [${otherFkDefault}], references: [id]${onDelete})\n` +
+          `\n  @@id([${thisFkDefault}, ${otherFkDefault}])\n}`,
+        )
+      }
+    }
+  }
+
+  // ── 2. Ambiguity counts ─────────────────────────────────────────────────────
+  const pairKey = (a: string, b: string): string => (a < b ? `${a}::${b}` : `${b}::${a}`)
+  const pairCount = new Map<string, number>()
+  const ownerTargetCount = new Map<string, number>()
+  for (const link of links) {
+    pairCount.set(pairKey(link.owner, link.target), (pairCount.get(pairKey(link.owner, link.target)) ?? 0) + 1)
+    const otKey = `${link.owner}::${link.target}`
+    ownerTargetCount.set(otKey, (ownerTargetCount.get(otKey) ?? 0) + 1)
+  }
+  const needsName = (link: OwnedLink): boolean =>
+    link.isSelf || (pairCount.get(pairKey(link.owner, link.target)) ?? 0) > 1
+  const ownerHasMany = (link: OwnedLink): boolean =>
+    (ownerTargetCount.get(`${link.owner}::${link.target}`) ?? 0) > 1
+
+  // ── 3. Render ───────────────────────────────────────────────────────────────
+  const linesByModel = new Map<string, string[]>()
+  const fkColumnsByModel = new Map<string, Set<string>>()
+  const push = (model: string, ...newLines: string[]): void => {
+    const arr = linesByModel.get(model) ?? []
+    arr.push(...newLines)
+    linesByModel.set(model, arr)
+  }
+  const addFk = (model: string, fk: string): void => {
+    const set = fkColumnsByModel.get(model) ?? new Set<string>()
+    set.add(fk)
+    fkColumnsByModel.set(model, set)
+  }
+
+  // 3a. Owner-side fields (FK column + object relation), in link order.
+  for (const link of links) {
+    if (!userNames.has(link.owner)) continue // synthetic join owner — rendered standalone
+    const opt = link.required ? '' : '?'
+    const fkUnique = link.unique ? ' @unique' : ''
+    const onDelete = link.onDelete ? `, onDelete: ${link.onDelete}` : ''
+    const fieldName = ownerHasMany(link) || link.isSelf ? link.fieldHint : link.target.toLowerCase()
+    const linkName = `${link.owner}_${link.fieldHint}`
+    const nameArg = needsName(link) ? `"${linkName}", ` : ''
+    addFk(link.owner, link.fk)
+    push(
+      link.owner,
+      `  ${padFieldName(link.fk)}String${opt}${fkUnique}`,
+      `  ${padFieldName(fieldName)}${link.target}${opt}   @relation(${nameArg}fields: [${link.fk}], references: [id]${onDelete})`,
+    )
+    if (link.isSelf) {
+      // The opposite (array) side of a self relation lives on the same model.
+      const backField = `${link.fieldHint}${link.target}s`
+      push(link.owner, `  ${padFieldName(backField)}${link.target}[] @relation("${linkName}")`)
+    }
+  }
+
+  // 3b. Back-relation arrays on user-defined targets, in link order.
+  for (const link of links) {
+    if (link.isSelf) continue // already emitted in 3a
+    if (!userNames.has(link.target)) continue // system targets handled separately
+    const linkName = `${link.owner}_${link.fieldHint}`
+    if (needsName(link)) {
+      const field = ownerHasMany(link)
+        ? `${link.fieldHint}${link.owner}s`
+        : backArrayField(link.owner)
+      push(link.target, `  ${padFieldName(field)}${link.owner}[] @relation("${linkName}")`)
+    } else {
+      push(link.target, `  ${padFieldName(backArrayField(link.owner))}${link.owner}[]`)
+    }
+  }
+
+  return { linesByModel, extrasByModel, fkColumnsByModel, createdJoinModels }
+}
+
+/**
+ * Relation lines for a single resource (FK + object + back-array fields).
+ * Thin wrapper over {@link planResourceRelations} so both this public helper
+ * and the schema generator share one source of truth.
+ */
 export function renderRelationFields(
   resource: ResourceDefinition,
-  allResources: ResourceDefinition[]
+  allResources: ResourceDefinition[],
 ): string[] {
-  const lines: string[] = []
-  const sourceModel = snakeToPascal(resource.name)
-  // Targets this resource relates to more than once need named relations.
-  const targetCounts = owningTargetCounts(resource)
-
-  for (const rel of resource.relations ?? []) {
-    const modelName = rel.resource.charAt(0).toUpperCase() + rel.resource.slice(1)
-    const onDelete = rel.onDelete ? `, onDelete: ${rel.onDelete}` : ''
-    const isSelf = rel.resource === resource.name
-
-    switch (rel.type) {
-      case 'manyToOne':
-      case 'oneToOne': {
-        const fk = fkFieldOf(rel)
-        const opt = rel.required ? '' : '?'
-        // A self relation ALWAYS needs an explicit @relation name AND a
-        // back-relation field on the SAME model (Prisma cannot infer the
-        // opposite side otherwise). A target reached more than once needs the
-        // same disambiguation so we never emit two `user User` fields.
-        const ambiguous = isSelf || (targetCounts.get(rel.resource) ?? 0) > 1
-        const fieldName = ambiguous ? relationFieldBase(rel) : rel.resource.toLowerCase()
-        const linkName = relationLinkName(sourceModel, rel)
-        const nameArg = ambiguous ? `"${linkName}", ` : ''
-        const fkUnique = rel.type === 'oneToOne' ? ' @unique' : ''
-        lines.push(`  ${padFieldName(fk)}String${opt}${fkUnique}`)
-        lines.push(`  ${padFieldName(fieldName)}${modelName}${opt}   @relation(${nameArg}fields: [${fk}], references: [id]${onDelete})`)
-        if (isSelf) {
-          // Opposite (array) side of the self relation, sharing the link name.
-          const backField = `${relationFieldBase(rel)}${modelName}s`
-          lines.push(`  ${padFieldName(backField)}${modelName}[] @relation("${linkName}")`)
-        }
-        break
-      }
-      case 'oneToMany': {
-        if (isSelf) {
-          // A self oneToMany paired with a self manyToOne/oneToOne is already
-          // covered (that branch emits the named back array) — skip to avoid an
-          // ambiguous duplicate. Declared alone, synthesise the owning side so
-          // Prisma sees a complete, named self relation.
-          const hasOwningSelf = (resource.relations ?? []).some(
-            (r) => r.resource === resource.name && (r.type === 'manyToOne' || r.type === 'oneToOne'),
-          )
-          if (hasOwningSelf) break
-          const linkName = `${sourceModel}_parent`
-          lines.push(`  ${padFieldName('parentId')}String?`)
-          lines.push(`  ${padFieldName('parent')}${modelName}?   @relation("${linkName}", fields: [parentId], references: [id]${onDelete})`)
-          lines.push(`  ${padFieldName(`${rel.resource.toLowerCase()}s`)}${modelName}[] @relation("${linkName}")`)
-          break
-        }
-        // No FK on this side — the FK lives on the target model
-        lines.push(`  ${padFieldName(`${rel.resource.toLowerCase()}s`)}${modelName}[]`)
-        break
-      }
-      case 'manyToMany': {
-        // Use explicit join model
-        const joinModel = snakeToPascal(rel.through ?? `${resource.name}${modelName}`)
-        lines.push(`  ${padFieldName(`${rel.resource.toLowerCase()}s`)}${joinModel}[]`)
-        break
-      }
-    }
-  }
-
-  // Reverse (back-relation) array fields for OTHER resources' owning-side
-  // relations that point here. When a single `other` model owns several FK
-  // relations to this resource, the back-relations are ambiguous: each needs a
-  // unique field name and the matching @relation("…") name so both sides pair.
-  for (const other of allResources) {
-    if (other.name === resource.name) continue
-    const otherModel = other.name.charAt(0).toUpperCase() + other.name.slice(1)
-    const incoming = owningRelations(other).filter((r) => r.resource === resource.name)
-    const ambiguous = incoming.length > 1
-
-    for (const rel of incoming) {
-      if (ambiguous) {
-        const field = `${relationFieldBase(rel)}${otherModel}s`
-        lines.push(`  ${padFieldName(field)}${otherModel}[] @relation("${relationLinkName(otherModel, rel)}")`)
-      } else {
-        // Skip when this resource already declares the inverse oneToMany / m2m.
-        const alreadyDeclared = resource.relations?.some(
-          (r) => r.resource === other.name && (r.type === 'oneToMany' || r.type === 'manyToMany'),
-        )
-        if (alreadyDeclared) continue
-        lines.push(`  ${padFieldName(`${other.name.toLowerCase()}s`)}${otherModel}[]`)
-      }
-    }
-  }
-
-  return lines
+  const plan = planResourceRelations(allResources)
+  const model = pascalName(resource.name)
+  return [...(plan.linesByModel.get(model) ?? []), ...(plan.extrasByModel.get(model) ?? [])]
 }
 
 export function renderJoinModels(
