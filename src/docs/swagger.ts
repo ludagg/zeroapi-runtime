@@ -6,6 +6,7 @@ import type {
   CrudAction,
 } from '../types/spec.js'
 import { toPlural } from '../utils/plural.js'
+import { buildAuthPaths, buildAuthSchemas, buildAuthTags } from './auth-openapi.js'
 
 // ── JSON Schema types (subset used for OpenAPI 3.0) ───────────────────────────
 
@@ -364,14 +365,21 @@ export function generateOpenAPISpec(spec: ZeroAPISpec): OpenAPISpec {
     paths = { ...paths, ...buildPaths(resource, securityRequirement) }
   }
 
+  // Auth endpoints the runtime mounts automatically (register/login/refresh/
+  // logout/me, OAuth, API-key admin). Emitted here so the doc + Playground show
+  // clients how to obtain a token instead of advertising bearerAuth on every
+  // path with no way to get one. Mirrors the mounting logic in createRuntime.
+  paths = { ...paths, ...buildAuthPaths(spec) }
+  Object.assign(schemas, buildAuthSchemas(spec))
+
   const servers: OpenAPIServer[] = [
     { url: spec.baseUrl ?? 'http://localhost:3000', description: 'API server' },
   ]
 
-  const tags = spec.resources.map((r) => ({
-    name: r.name,
-    description: r.description,
-  }))
+  const tags = [
+    ...spec.resources.map((r) => ({ name: r.name, description: r.description })),
+    ...buildAuthTags(spec),
+  ]
 
   const securitySchemes = buildSecuritySchemes(spec)
 
