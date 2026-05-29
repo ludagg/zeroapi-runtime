@@ -94,6 +94,16 @@ export function relationLinkName(ownerModel: string, rel: RelationDefinition): s
   return `${ownerModel}_${relationFieldBase(rel)}`
 }
 
+/**
+ * Pads a Prisma field name so the following type token can never glue to it.
+ * Short names align to column 14 (matching renderField); names ≥13 chars still
+ * get at least one separating space — without this a 14-char FK like
+ * `oauthAccountId` would render as `oauthAccountIdString`, which Prisma rejects.
+ */
+export function padFieldName(name: string): string {
+  return name.padEnd(Math.max(14, name.length + 1))
+}
+
 /** Owning-side relations (manyToOne / oneToOne) of a resource. */
 function owningRelations(resource: ResourceDefinition): RelationDefinition[] {
   return (resource.relations ?? []).filter(
@@ -126,31 +136,55 @@ export function renderRelationFields(
   for (const rel of resource.relations ?? []) {
     const modelName = rel.resource.charAt(0).toUpperCase() + rel.resource.slice(1)
     const onDelete = rel.onDelete ? `, onDelete: ${rel.onDelete}` : ''
+    const isSelf = rel.resource === resource.name
 
     switch (rel.type) {
       case 'manyToOne':
       case 'oneToOne': {
         const fk = fkFieldOf(rel)
         const opt = rel.required ? '' : '?'
-        const ambiguous = (targetCounts.get(rel.resource) ?? 0) > 1
-        // Distinct field name per relation when the target repeats, so we never
-        // emit two `user User` fields on the same model.
+        // A self relation ALWAYS needs an explicit @relation name AND a
+        // back-relation field on the SAME model (Prisma cannot infer the
+        // opposite side otherwise). A target reached more than once needs the
+        // same disambiguation so we never emit two `user User` fields.
+        const ambiguous = isSelf || (targetCounts.get(rel.resource) ?? 0) > 1
         const fieldName = ambiguous ? relationFieldBase(rel) : rel.resource.toLowerCase()
-        const nameArg = ambiguous ? `"${relationLinkName(sourceModel, rel)}", ` : ''
+        const linkName = relationLinkName(sourceModel, rel)
+        const nameArg = ambiguous ? `"${linkName}", ` : ''
         const fkUnique = rel.type === 'oneToOne' ? ' @unique' : ''
-        lines.push(`  ${fk.padEnd(14)}String${opt}${fkUnique}`)
-        lines.push(`  ${fieldName.padEnd(14)}${modelName}${opt}   @relation(${nameArg}fields: [${fk}], references: [id]${onDelete})`)
+        lines.push(`  ${padFieldName(fk)}String${opt}${fkUnique}`)
+        lines.push(`  ${padFieldName(fieldName)}${modelName}${opt}   @relation(${nameArg}fields: [${fk}], references: [id]${onDelete})`)
+        if (isSelf) {
+          // Opposite (array) side of the self relation, sharing the link name.
+          const backField = `${relationFieldBase(rel)}${modelName}s`
+          lines.push(`  ${padFieldName(backField)}${modelName}[] @relation("${linkName}")`)
+        }
         break
       }
       case 'oneToMany': {
+        if (isSelf) {
+          // A self oneToMany paired with a self manyToOne/oneToOne is already
+          // covered (that branch emits the named back array) — skip to avoid an
+          // ambiguous duplicate. Declared alone, synthesise the owning side so
+          // Prisma sees a complete, named self relation.
+          const hasOwningSelf = (resource.relations ?? []).some(
+            (r) => r.resource === resource.name && (r.type === 'manyToOne' || r.type === 'oneToOne'),
+          )
+          if (hasOwningSelf) break
+          const linkName = `${sourceModel}_parent`
+          lines.push(`  ${padFieldName('parentId')}String?`)
+          lines.push(`  ${padFieldName('parent')}${modelName}?   @relation("${linkName}", fields: [parentId], references: [id]${onDelete})`)
+          lines.push(`  ${padFieldName(`${rel.resource.toLowerCase()}s`)}${modelName}[] @relation("${linkName}")`)
+          break
+        }
         // No FK on this side — the FK lives on the target model
-        lines.push(`  ${rel.resource.toLowerCase()}s${' '.repeat(Math.max(0, 13 - rel.resource.length))} ${modelName}[]`)
+        lines.push(`  ${padFieldName(`${rel.resource.toLowerCase()}s`)}${modelName}[]`)
         break
       }
       case 'manyToMany': {
         // Use explicit join model
         const joinModel = snakeToPascal(rel.through ?? `${resource.name}${modelName}`)
-        lines.push(`  ${rel.resource.toLowerCase()}s${' '.repeat(Math.max(0, 13 - rel.resource.length))} ${joinModel}[]`)
+        lines.push(`  ${padFieldName(`${rel.resource.toLowerCase()}s`)}${joinModel}[]`)
         break
       }
     }
@@ -169,15 +203,14 @@ export function renderRelationFields(
     for (const rel of incoming) {
       if (ambiguous) {
         const field = `${relationFieldBase(rel)}${otherModel}s`
-        // Guarantee ≥1 space so a 14-char field name never glues to the type.
-        lines.push(`  ${field.padEnd(Math.max(14, field.length + 1))}${otherModel}[] @relation("${relationLinkName(otherModel, rel)}")`)
+        lines.push(`  ${padFieldName(field)}${otherModel}[] @relation("${relationLinkName(otherModel, rel)}")`)
       } else {
         // Skip when this resource already declares the inverse oneToMany / m2m.
         const alreadyDeclared = resource.relations?.some(
           (r) => r.resource === other.name && (r.type === 'oneToMany' || r.type === 'manyToMany'),
         )
         if (alreadyDeclared) continue
-        lines.push(`  ${other.name.toLowerCase()}s${' '.repeat(Math.max(0, 13 - other.name.length))} ${otherModel}[]`)
+        lines.push(`  ${padFieldName(`${other.name.toLowerCase()}s`)}${otherModel}[]`)
       }
     }
   }
@@ -203,17 +236,17 @@ export function renderJoinModels(
     const extraFields = Object.entries(rel.fields ?? {}).map(([name, field]) => {
       const prismaType = FIELD_TYPE_MAP[field.type] ?? 'String'
       const opt = field.required ? '' : '?'
-      return `  ${name.padEnd(14)}${prismaType}${opt}`
+      return `  ${padFieldName(name)}${prismaType}${opt}`
     })
 
     const onDelete = rel.onDelete ? `, onDelete: ${rel.onDelete}` : ''
     models.push(
       `model ${joinModel} {\n` +
-      `  ${thisFk.padEnd(14)}String\n` +
-      `  ${otherFk.padEnd(14)}String\n` +
+      `  ${padFieldName(thisFk)}String\n` +
+      `  ${padFieldName(otherFk)}String\n` +
       extraFields.join('\n') + (extraFields.length ? '\n' : '') +
-      `  ${resource.name.toLowerCase().padEnd(14)}${thisModel}  @relation(fields: [${thisFk}], references: [id]${onDelete})\n` +
-      `  ${rel.resource.toLowerCase().padEnd(14)}${otherModel}  @relation(fields: [${otherFk}], references: [id]${onDelete})\n` +
+      `  ${padFieldName(resource.name.toLowerCase())}${thisModel}  @relation(fields: [${thisFk}], references: [id]${onDelete})\n` +
+      `  ${padFieldName(rel.resource.toLowerCase())}${otherModel}  @relation(fields: [${otherFk}], references: [id]${onDelete})\n` +
       `\n  @@id([${thisFk}, ${otherFk}])\n}`
     )
 

@@ -1,5 +1,5 @@
 import type { ZeroAPISpec, ResourceDefinition, FieldDefinition, FieldType } from '../types/spec.js'
-import { renderRelationFields, relationFieldBase, relationLinkName } from '../relations/index.js'
+import { renderRelationFields, relationFieldBase, relationLinkName, padFieldName } from '../relations/index.js'
 import { renderWebhookModels } from '../webhooks/schema.js'
 
 const PRISMA_TYPE_MAP: Record<FieldType, string> = {
@@ -156,7 +156,7 @@ function planJoinModels(resources: ResourceDefinition[]): {
       )
       if (otherRes && otherRes.name !== resource.name && !otherDeclaresInverse) {
         const fieldName = `${resource.name.toLowerCase()}s`
-        addExtra(otherModel, `  ${fieldName.padEnd(13)} ${joinModel}[]`)
+        addExtra(otherModel, `  ${padFieldName(fieldName)}${joinModel}[]`)
       }
 
       if (userModelNames.has(joinModel)) {
@@ -173,8 +173,8 @@ function planJoinModels(resources: ResourceDefinition[]): {
         const lines: string[] = []
         const addEndpoint = (fk: string, target: string, targetField: string) => {
           if (hasRelTo(target)) return // FK + @relation already emitted by renderRelationFields
-          if (!hasField(fk)) lines.push(`  ${fk.padEnd(14)}String`)
-          lines.push(`  ${targetField.padEnd(14)}${target}  @relation(fields: [${fk}], references: [id]${onDelete})`)
+          if (!hasField(fk)) lines.push(`  ${padFieldName(fk)}String`)
+          lines.push(`  ${padFieldName(targetField)}${target}  @relation(fields: [${fk}], references: [id]${onDelete})`)
         }
         addEndpoint(thisFk, thisModel, resource.name.toLowerCase())
         addEndpoint(otherFk, otherModel, rel.resource.toLowerCase())
@@ -185,15 +185,15 @@ function planJoinModels(resources: ResourceDefinition[]): {
         const extraFields = Object.entries(rel.fields ?? {}).map(([name, field]) => {
           const prismaType = PRISMA_TYPE_MAP[field.type] ?? 'String'
           const opt = field.required ? '' : '?'
-          return `  ${name.padEnd(14)}${prismaType}${opt}`
+          return `  ${padFieldName(name)}${prismaType}${opt}`
         })
         createdModels.push(
           `model ${joinModel} {\n` +
-          `  ${thisFk.padEnd(14)}String\n` +
-          `  ${otherFk.padEnd(14)}String\n` +
+          `  ${padFieldName(thisFk)}String\n` +
+          `  ${padFieldName(otherFk)}String\n` +
           (extraFields.length ? extraFields.join('\n') + '\n' : '') +
-          `  ${resource.name.toLowerCase().padEnd(14)}${thisModel}  @relation(fields: [${thisFk}], references: [id]${onDelete})\n` +
-          `  ${rel.resource.toLowerCase().padEnd(14)}${otherModel}  @relation(fields: [${otherFk}], references: [id]${onDelete})\n` +
+          `  ${padFieldName(resource.name.toLowerCase())}${thisModel}  @relation(fields: [${thisFk}], references: [id]${onDelete})\n` +
+          `  ${padFieldName(rel.resource.toLowerCase())}${otherModel}  @relation(fields: [${otherFk}], references: [id]${onDelete})\n` +
           `\n  @@id([${thisFk}, ${otherFk}])\n}`,
         )
       }
@@ -239,7 +239,6 @@ datasource db {
   // Phase 1.1: API-key storage model — emitted whenever apikey auth is active
   const apiKeyAuthEnabled =
     spec.auth?.strategy === 'apikey' || spec.auth?.apikey?.enabled === true
-  const apiKeyModel = apiKeyAuthEnabled ? renderApiKeyModel() : null
 
   // Phase 1.2: JWT user system — emit User + RefreshToken when opted in.
   // Phase 1.3: extend User with back-relations for each ownOnly-owned resource.
@@ -248,13 +247,29 @@ datasource db {
   // that declares an explicit manyToOne / oneToOne to "User".
   const jwtUserSystemEnabled = spec.auth?.jwt?.enabled === true
   const oauthEnabled = (spec.auth?.oauth?.providers?.length ?? 0) > 0
+
+  // Every system resource a user-defined model can point at needs the matching
+  // back-relation array field rendered on it, or Prisma raises P1012 ("missing
+  // opposite relation field"). User additionally absorbs the ownOnly-owned
+  // resources injected via the RBAC `userId` column.
   const userBackRelations = jwtUserSystemEnabled
-    ? collectUserBackRelations(resources, ownedResources.map((r) => r.name))
+    ? collectBackRelations(resources, 'User', ownedResources.map((r) => r.name))
     : []
+  const refreshTokenBackRelations = jwtUserSystemEnabled
+    ? collectBackRelations(resources, 'RefreshToken', [])
+    : []
+  const apiKeyBackRelations = apiKeyAuthEnabled
+    ? collectBackRelations(resources, 'ApiKey', [])
+    : []
+  const oauthBackRelations = oauthEnabled
+    ? collectBackRelations(resources, 'OAuthAccount', [])
+    : []
+
+  const apiKeyModel = apiKeyAuthEnabled ? renderApiKeyModel(apiKeyBackRelations) : null
   const jwtUserModels = jwtUserSystemEnabled
-    ? renderJwtUserModels(userBackRelations, oauthEnabled)
+    ? renderJwtUserModels(userBackRelations, oauthEnabled, refreshTokenBackRelations)
     : []
-  const oauthModel = oauthEnabled ? renderOAuthAccountModel() : null
+  const oauthModel = oauthEnabled ? renderOAuthAccountModel(oauthBackRelations) : null
 
   // Phase 3.3: webhook models — emitted only when the feature is enabled
   // (either outbound or inbound events declared).
@@ -268,8 +283,23 @@ datasource db {
   return parts.join('\n\n') + '\n'
 }
 
-function renderApiKeyModel(): string {
-  return `model ApiKey {
+/** Renders the back-relation array lines (`<name> Model[] [@relation("…")]`)
+ *  to splice onto a system model. */
+function renderBackRelationLines(backs: UserBackRelation[]): string[] {
+  return backs.map((b) => {
+    const relClause = b.relationName ? ` @relation("${b.relationName}")` : ''
+    return `  ${padFieldName(b.field)}${b.model}[]${relClause}`
+  })
+}
+
+/** Appends extra relation lines just before a model's closing brace. */
+function withExtraLines(model: string, extra: string[]): string {
+  if (extra.length === 0) return model
+  return model.replace(/\n}$/, '\n' + extra.join('\n') + '\n}')
+}
+
+function renderApiKeyModel(backRelations: UserBackRelation[] = []): string {
+  const model = `model ApiKey {
   id         String    @id @default(uuid())
   keyHash    String    @unique
   keyPrefix  String
@@ -279,6 +309,7 @@ function renderApiKeyModel(): string {
   lastUsedAt DateTime?
   createdAt  DateTime  @default(now())
 }`
+  return withExtraLines(model, renderBackRelationLines(backRelations))
 }
 
 /** Back-reference line to emit on the User model. `field` is the plural
@@ -292,41 +323,44 @@ interface UserBackRelation {
 }
 
 /**
- * Collects the back-relations to emit on the User model:
- *   · `owned<Name>s` for resources owned via the ownOnly RBAC injection
- *   · `<name>s` (lowercased plural) for resources that declare a single
- *     explicit manyToOne / oneToOne to "User" in their `relations[]`
+ * Collects the back-relations to emit on a system model (`targetName`):
+ *   · `<name>s` (lowercased plural) for a resource that declares a single
+ *     explicit manyToOne / oneToOne to the target in its `relations[]`
  *   · one named back-relation PER relation when a resource declares SEVERAL
- *     relations to User (e.g. `buyerId` + `sellerId`): without distinct field
- *     names and matching `@relation("…")` names Prisma raises P1012.
+ *     relations to the target (e.g. `buyerId` + `sellerId` → User): without
+ *     distinct field names and matching `@relation("…")` names Prisma raises
+ *     P1012.
+ *   · `owned<Name>s` for resources owned via the ownOnly RBAC `userId`
+ *     injection (only meaningful for the User target).
  *
- * Explicit relations and ownOnly injection are de-duplicated by target model
- * so a resource that is both ownOnly AND explicitly related to User contributes
- * the explicit relation only.
+ * Explicit relations and ownOnly injection are de-duplicated by source model
+ * so a resource that is both ownOnly AND explicitly related contributes the
+ * explicit relation only.
  */
-function collectUserBackRelations(
+function collectBackRelations(
   resources: ResourceDefinition[],
+  targetName: string,
   ownedResourceNames: string[],
 ): UserBackRelation[] {
   const out: UserBackRelation[] = []
   const explicitModels = new Set<string>()
 
   for (const resource of resources) {
-    const userRels = (resource.relations ?? []).filter(
+    const rels = (resource.relations ?? []).filter(
       (rel) =>
-        rel.resource === 'User' &&
+        rel.resource === targetName &&
         (rel.type === 'manyToOne' || rel.type === 'oneToOne'),
     )
-    if (userRels.length === 0) continue
+    if (rels.length === 0) continue
     const modelName = resource.name.charAt(0).toUpperCase() + resource.name.slice(1)
     explicitModels.add(modelName)
 
-    if (userRels.length === 1) {
+    if (rels.length === 1) {
       out.push({ field: `${resource.name.toLowerCase()}s`, model: modelName })
     } else {
-      // Multiple relations to User → emit one named back-relation each so the
-      // FK side (rendered with the same name) pairs unambiguously.
-      for (const rel of userRels) {
+      // Multiple relations to the same target → emit one named back-relation
+      // each so the FK side (rendered with the same name) pairs unambiguously.
+      for (const rel of rels) {
         out.push({
           field: `${relationFieldBase(rel)}${modelName}s`,
           model: modelName,
@@ -346,16 +380,16 @@ function collectUserBackRelations(
   return out
 }
 
-function renderJwtUserModels(backRelations: UserBackRelation[], includeOAuth: boolean): string[] {
+function renderJwtUserModels(
+  backRelations: UserBackRelation[],
+  includeOAuth: boolean,
+  refreshTokenBackRelations: UserBackRelation[] = [],
+): string[] {
   const extraLines: string[] = []
   if (includeOAuth) {
     extraLines.push(`  oauthAccounts OAuthAccount[]`)
   }
-  for (const back of backRelations) {
-    // Pad to 13 chars to align with the other User columns.
-    const relClause = back.relationName ? ` @relation("${back.relationName}")` : ''
-    extraLines.push(`  ${back.field.padEnd(13)} ${back.model}[]${relClause}`)
-  }
+  extraLines.push(...renderBackRelationLines(backRelations))
 
   const userModel = `model User {
   id            String    @id @default(uuid())
@@ -369,7 +403,8 @@ function renderJwtUserModels(backRelations: UserBackRelation[], includeOAuth: bo
   refreshTokens RefreshToken[]${extraLines.length > 0 ? '\n' + extraLines.join('\n') : ''}
 }`
 
-  const refreshTokenModel = `model RefreshToken {
+  const refreshTokenModel = withExtraLines(
+    `model RefreshToken {
   id        String   @id @default(uuid())
   tokenHash String   @unique
   userId    String
@@ -377,13 +412,15 @@ function renderJwtUserModels(backRelations: UserBackRelation[], includeOAuth: bo
   expiresAt DateTime
   revoked   Boolean  @default(false)
   createdAt DateTime @default(now())
-}`
+}`,
+    renderBackRelationLines(refreshTokenBackRelations),
+  )
 
   return [userModel, refreshTokenModel]
 }
 
-function renderOAuthAccountModel(): string {
-  return `model OAuthAccount {
+function renderOAuthAccountModel(backRelations: UserBackRelation[] = []): string {
+  const model = `model OAuthAccount {
   id         String   @id @default(uuid())
   provider   String
   providerId String
@@ -392,4 +429,5 @@ function renderOAuthAccountModel(): string {
   createdAt  DateTime @default(now())
   @@unique([provider, providerId])
 }`
+  return withExtraLines(model, renderBackRelationLines(backRelations))
 }
