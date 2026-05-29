@@ -115,6 +115,57 @@ const relationSpecs: BatterySpec[] = [
     },
   },
   {
+    // The through model is ALSO a first-class resource directly related to BOTH
+    // endpoints. Without de-duplication this emits two unnamed `OrderItem[]`
+    // back-relations on each endpoint → "Ambiguous relation … both refer to
+    // OrderItem". Each endpoint must end up with exactly one OrderItem array.
+    name: 'rel-m2m-through-plus-direct',
+    raw: {
+      version: '1.0.0',
+      name: 'm2m-through-direct',
+      resources: [
+        { name: 'Product', fields: { name: { type: 'string', required: true } } },
+        { name: 'Order', fields: { total: { type: 'decimal', required: true } } },
+        {
+          name: 'OrderItem',
+          fields: {
+            quantity: { type: 'integer', required: true },
+            priceAtPurchase: { type: 'decimal', required: true },
+          },
+        },
+      ],
+      relations: [
+        { from: 'Order', to: 'Product', type: 'many-to-many', field: 'products', through: 'OrderItem' },
+        { from: 'Product', to: 'OrderItem', type: 'one-to-many', field: 'orderItems' },
+        { from: 'Order', to: 'OrderItem', type: 'one-to-many', field: 'orderItems' },
+      ],
+    },
+  },
+  {
+    // Same shape, but the through model declares its OWN manyToOne relations to
+    // the endpoints (instead of the inverse one-to-many being declared on them).
+    name: 'rel-m2m-through-owns-fks',
+    raw: {
+      version: '1.0.0',
+      name: 'm2m-through-owns',
+      resources: [
+        { name: 'Product', fields: { name: { type: 'string', required: true } } },
+        { name: 'Order', fields: { total: { type: 'decimal', required: true } } },
+        {
+          name: 'OrderItem',
+          fields: { quantity: { type: 'integer', required: true } },
+          relations: [
+            { type: 'manyToOne', resource: 'Order', field: 'orderId', required: true },
+            { type: 'manyToOne', resource: 'Product', field: 'productId', required: true },
+          ],
+        },
+      ],
+      relations: [
+        { from: 'Order', to: 'Product', type: 'many-to-many', field: 'products', through: 'OrderItem' },
+      ],
+    },
+  },
+  {
     name: 'rel-multi-same-target-user',
     raw: {
       version: '1.0.0',
@@ -574,6 +625,44 @@ const realWorldSpecs: BatterySpec[] = [
       relations: [
         { from: 'Category', to: 'Product', type: 'one-to-many', field: 'products' },
         { from: 'Product', to: 'Order', type: 'many-to-many', field: 'orders', through: 'OrderItem' },
+        { from: 'Review', to: 'Product', type: 'many-to-one', field: 'productId' },
+        { from: 'Review', to: 'User', type: 'many-to-one', field: 'userId' },
+        { from: 'Order', to: 'User', type: 'many-to-one', field: 'userId' },
+      ],
+    },
+  },
+  {
+    // The REAL spec produced by the clarifier for an e-commerce app — captured
+    // verbatim from the job that failed `prisma validate` in production. It
+    // differs from `real-ecommerce` above by ALSO declaring direct one-to-many
+    // relations from Product/Order to the OrderItem through-model, which is what
+    // triggered the ambiguous-relation P1012.
+    name: 'real-ecommerce-clarifier',
+    raw: {
+      version: '1.0.0',
+      name: 'ecommerce-clarifier',
+      auth: { jwt: { enabled: true } },
+      resources: [
+        { name: 'Category', fields: { name: { type: 'string', required: true } } },
+        {
+          name: 'Product',
+          fields: { name: { type: 'string', required: true }, price: { type: 'decimal', required: true } },
+        },
+        { name: 'Order', fields: { total: { type: 'decimal', required: true } } },
+        {
+          name: 'OrderItem',
+          fields: {
+            quantity: { type: 'integer', required: true },
+            priceAtPurchase: { type: 'decimal', required: true },
+          },
+        },
+        { name: 'Review', fields: { rating: { type: 'integer', required: true } } },
+      ],
+      relations: [
+        { from: 'Category', to: 'Product', type: 'one-to-many', field: 'products' },
+        { from: 'Order', to: 'Product', type: 'many-to-many', field: 'products', through: 'OrderItem' },
+        { from: 'Product', to: 'OrderItem', type: 'one-to-many', field: 'orderItems' },
+        { from: 'Order', to: 'OrderItem', type: 'one-to-many', field: 'orderItems' },
         { from: 'Review', to: 'Product', type: 'many-to-one', field: 'productId' },
         { from: 'Review', to: 'User', type: 'many-to-one', field: 'userId' },
         { from: 'Order', to: 'User', type: 'many-to-one', field: 'userId' },

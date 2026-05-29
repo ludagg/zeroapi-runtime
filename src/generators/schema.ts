@@ -1,5 +1,8 @@
 import type { ZeroAPISpec, ResourceDefinition, FieldDefinition, FieldType } from '../types/spec.js'
-import { renderRelationFields, relationFieldBase, relationLinkName, padFieldName } from '../relations/index.js'
+import {
+  planResourceRelations, relationFieldBase, relationLinkName, padFieldName,
+  type RelationRenderPlan,
+} from '../relations/index.js'
 import { renderWebhookModels } from '../webhooks/schema.js'
 
 const PRISMA_TYPE_MAP: Record<FieldType, string> = {
@@ -41,14 +44,15 @@ function resourceHasOwnOnly(spec: ZeroAPISpec, resourceName: string): boolean {
 
 function renderModel(
   resource: ResourceDefinition,
-  allResources: ResourceDefinition[],
   ownedByUser: boolean,
-  extraLines: string[] = [],
+  plan: RelationRenderPlan,
 ): string {
   const modelName = resource.name.charAt(0).toUpperCase() + resource.name.slice(1)
 
-  // FK fields owned by relations — must not be re-declared from spec fields
-  const relationFkFields = new Set<string>()
+  // FK fields owned by relations (incl. m2m-join FKs) — never re-declared from
+  // spec fields. The plan is the authoritative source of which columns a model
+  // owns; it already collapses redundant declarations.
+  const relationFkFields = new Set<string>(plan.fkColumnsByModel.get(modelName) ?? [])
   // Explicit relation to the system User (manyToOne/oneToOne) takes precedence
   // over the implicit ownOnly userId injection — the explicit relation already
   // emits `userId String` + `user User @relation(...)`.
@@ -57,11 +61,6 @@ function renderModel(
       rel.resource === 'User' &&
       (rel.type === 'manyToOne' || rel.type === 'oneToOne'),
   )
-  for (const rel of resource.relations ?? []) {
-    if (rel.type === 'manyToOne' || rel.type === 'oneToOne') {
-      relationFkFields.add(rel.field ?? `${rel.resource.toLowerCase()}Id`)
-    }
-  }
   // Skip a spec-declared "userId" field when ownership injection owns the column,
   // so we don't emit it twice.
   if (ownedByUser) relationFkFields.add('userId')
@@ -80,127 +79,10 @@ function renderModel(
     baseFields.push(`  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)`)
   }
 
-  const relationLines = renderRelationFields(resource, allResources)
+  const relationLines = plan.linesByModel.get(modelName) ?? []
+  const extraLines = plan.extrasByModel.get(modelName) ?? []
 
   return `model ${modelName} {\n${[...baseFields, ...relationLines, ...extraLines].join('\n')}\n}`
-}
-
-/** PascalCase a single resource name (first letter upper). */
-function pascal(name: string): string {
-  return name.charAt(0).toUpperCase() + name.slice(1)
-}
-
-/** PascalCase a snake/kebab join-table name (e.g. "order_items" → "OrderItems"). */
-function snakeToPascal(str: string): string {
-  return str
-    .split(/[_-]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join('')
-}
-
-/**
- * Plans how each many-to-many `through` join table is materialised in the
- * schema, and the back-relation fields its endpoints need.
- *
- * The key fix here: a `through` table may name a resource the user already
- * declared in `resources[]` (e.g. an `OrderItem` carrying `quantity` /
- * `priceAtPurchase`). Emitting a fresh join model for it would produce a
- * second `model OrderItem { … }` and trip Prisma P1012. Instead we:
- *
- *   · ENRICH  — when the join name matches a user resource: append the FK
- *               columns, `@relation` fields and a composite `@@unique` to that
- *               existing model (only the parts not already declared).
- *   · CREATE  — otherwise: render a standalone join model from scratch.
- *
- * Either way the opposite endpoint gets its back-relation array field so the
- * emitted schema is a valid Prisma relation on both sides.
- *
- * Returns the freshly-created join models plus a map of extra lines to append
- * to existing models (keyed by PascalCase model name).
- */
-function planJoinModels(resources: ResourceDefinition[]): {
-  createdModels: string[]
-  extraByModel: Map<string, string[]>
-} {
-  const userModelNames = new Set(resources.map((r) => pascal(r.name)))
-  const createdModels: string[] = []
-  const extraByModel = new Map<string, string[]>()
-  const seenThrough = new Set<string>()
-
-  const addExtra = (model: string, ...lines: string[]) => {
-    const arr = extraByModel.get(model) ?? []
-    arr.push(...lines)
-    extraByModel.set(model, arr)
-  }
-
-  for (const resource of resources) {
-    for (const rel of resource.relations ?? []) {
-      if (rel.type !== 'manyToMany' || !rel.through) continue
-      if (seenThrough.has(rel.through)) continue
-      seenThrough.add(rel.through)
-
-      const thisModel  = pascal(resource.name)
-      const otherModel = pascal(rel.resource)
-      const joinModel  = snakeToPascal(rel.through)
-      const thisFk     = `${resource.name.toLowerCase()}Id`
-      const otherFk    = `${rel.resource.toLowerCase()}Id`
-      const onDelete   = rel.onDelete ? `, onDelete: ${rel.onDelete}` : ''
-
-      // Back-relation array on the opposite endpoint. The declaring side
-      // already gets one via renderRelationFields' manyToMany branch; skip if
-      // the other side declares the inverse m2m itself (it gets one too) to
-      // avoid an ambiguous duplicate relation field.
-      const otherRes = resources.find((r) => r.name === rel.resource)
-      const otherDeclaresInverse = (otherRes?.relations ?? []).some(
-        (r) => r.type === 'manyToMany' && r.through === rel.through,
-      )
-      if (otherRes && otherRes.name !== resource.name && !otherDeclaresInverse) {
-        const fieldName = `${resource.name.toLowerCase()}s`
-        addExtra(otherModel, `  ${padFieldName(fieldName)}${joinModel}[]`)
-      }
-
-      if (userModelNames.has(joinModel)) {
-        // ── ENRICH an existing user-defined resource ───────────────────────
-        const joinRes = resources.find((r) => pascal(r.name) === joinModel)!
-        const hasField = (n: string) => n in (joinRes.fields ?? {})
-        const hasRelTo = (model: string) =>
-          (joinRes.relations ?? []).some(
-            (r) =>
-              (r.type === 'manyToOne' || r.type === 'oneToOne') &&
-              pascal(r.resource) === model,
-          )
-
-        const lines: string[] = []
-        const addEndpoint = (fk: string, target: string, targetField: string) => {
-          if (hasRelTo(target)) return // FK + @relation already emitted by renderRelationFields
-          if (!hasField(fk)) lines.push(`  ${padFieldName(fk)}String`)
-          lines.push(`  ${padFieldName(targetField)}${target}  @relation(fields: [${fk}], references: [id]${onDelete})`)
-        }
-        addEndpoint(thisFk, thisModel, resource.name.toLowerCase())
-        addEndpoint(otherFk, otherModel, rel.resource.toLowerCase())
-        lines.push(`  @@unique([${thisFk}, ${otherFk}])`)
-        addExtra(joinModel, ...lines)
-      } else {
-        // ── CREATE a standalone join model ─────────────────────────────────
-        const extraFields = Object.entries(rel.fields ?? {}).map(([name, field]) => {
-          const prismaType = PRISMA_TYPE_MAP[field.type] ?? 'String'
-          const opt = field.required ? '' : '?'
-          return `  ${padFieldName(name)}${prismaType}${opt}`
-        })
-        createdModels.push(
-          `model ${joinModel} {\n` +
-          `  ${padFieldName(thisFk)}String\n` +
-          `  ${padFieldName(otherFk)}String\n` +
-          (extraFields.length ? extraFields.join('\n') + '\n' : '') +
-          `  ${padFieldName(resource.name.toLowerCase())}${thisModel}  @relation(fields: [${thisFk}], references: [id]${onDelete})\n` +
-          `  ${padFieldName(rel.resource.toLowerCase())}${otherModel}  @relation(fields: [${otherFk}], references: [id]${onDelete})\n` +
-          `\n  @@id([${thisFk}, ${otherFk}])\n}`,
-        )
-      }
-    }
-  }
-
-  return { createdModels, extraByModel }
 }
 
 /**
@@ -225,15 +107,14 @@ datasource db {
 
   const ownedResources = resources.filter((r) => resourceHasOwnOnly(spec, r.name))
 
-  // Plan many-to-many join tables first: a `through` table may reference a
-  // user-declared resource, in which case we enrich that model in place
-  // (extraByModel) instead of emitting a duplicate join model.
-  const { createdModels: joinModels, extraByModel } = planJoinModels(resources)
+  // Reduce every relation to a de-duplicated set of owning FK links, detect
+  // ambiguity systematically (any model pair connected more than once), and
+  // render relation fields + join models from that single source of truth.
+  const plan = planResourceRelations(resources)
+  const joinModels = plan.createdJoinModels
 
   const models = resources
-    .map((r) =>
-      renderModel(r, resources, resourceHasOwnOnly(spec, r.name), extraByModel.get(pascal(r.name)) ?? []),
-    )
+    .map((r) => renderModel(r, resourceHasOwnOnly(spec, r.name), plan))
     .join('\n\n')
 
   // Phase 1.1: API-key storage model — emitted whenever apikey auth is active
