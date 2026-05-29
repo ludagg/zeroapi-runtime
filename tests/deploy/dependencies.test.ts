@@ -26,11 +26,14 @@ function s3Spec(provider: 's3' | 'r2' | 'local'): ZeroAPISpec {
 }
 
 describe('getRequiredDependencies — base', () => {
-  it('always includes the runtime, hono, zod and the prisma client', () => {
+  it('always includes the runtime, hono, the node-server adapter, zod and the prisma client', () => {
     const deps = getRequiredDependencies(baseSpec)
     const names = deps.filter((d) => !d.dev).map((d) => d.name)
     expect(names).toContain('@ludagg/zeroapi-runtime')
     expect(names).toContain('hono')
+    // The HTTP adapter that binds the port — without it `node dist/index.js`
+    // crashes with "Cannot find module '@hono/node-server'".
+    expect(names).toContain('@hono/node-server')
     expect(names).toContain('zod')
     expect(names).toContain('@prisma/client')
   })
@@ -118,6 +121,7 @@ describe('generatePackageJson', () => {
     const pkg = JSON.parse(generatePackageJson(baseSpec))
     expect(pkg.dependencies['@ludagg/zeroapi-runtime']).toBeDefined()
     expect(pkg.dependencies['hono']).toBeDefined()
+    expect(pkg.dependencies['@hono/node-server']).toBeDefined()
     expect(pkg.dependencies['zod']).toBeDefined()
     expect(pkg.dependencies['@prisma/client']).toBeDefined()
     expect(pkg.devDependencies['prisma']).toBeDefined()

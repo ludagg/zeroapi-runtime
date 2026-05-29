@@ -31,6 +31,10 @@ export interface AggregatedDependency {
 const VERSIONS = {
   runtime: '^0.16.0',
   hono: '^4.0.0',
+  // Node HTTP adapter — `serve({ fetch: app.fetch, port })` is what binds the
+  // port when the generated API runs via `node dist/index.js`. Hono on its own
+  // only produces a `fetch` handler and does NOT start a server.
+  honoNodeServer: '^1.13.0',
   zod: '^3.22.0',
   prismaClient: '^5.22.0',
   // Matches the optional peerDependency declared by @ludagg/zeroapi-runtime.
@@ -83,8 +87,12 @@ export function getRequiredDependencies(spec: ZeroAPISpec): AggregatedDependency
   }
 
   // ── Base runtime dependencies (always imported by the generated API) ────────
+  // The generated `index.ts` imports `serve` from @hono/node-server to bind the
+  // HTTP port (`node dist/index.js`), and createRuntime from the runtime. Hono
+  // and Zod back the app/schemas. All four are needed at runtime.
   add({ name: RUNTIME_PACKAGE, version: VERSIONS.runtime, dev: false, source: 'base' })
   add({ name: 'hono', version: VERSIONS.hono, dev: false, source: 'base' })
+  add({ name: '@hono/node-server', version: VERSIONS.honoNodeServer, dev: false, source: 'base' })
   add({ name: 'zod', version: VERSIONS.zod, dev: false, source: 'base' })
 
   // ── Database (Prisma client is always used; the CLI is a dev dependency) ────
