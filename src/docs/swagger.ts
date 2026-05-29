@@ -65,19 +65,27 @@ const TYPE_MAP: Record<FieldType, JSONSchema> = {
   url:       { type: 'string', format: 'uri' },
   uuid:      { type: 'string', format: 'uuid' },
   file:      { type: 'string', format: 'uri', description: 'URL of the uploaded file' },
-  'file[]':  { type: 'array', description: 'List of uploaded file URLs' },
+  // OpenAPI 3.0 requires `items` on every array schema — without it the doc is
+  // invalid. File lists are stored as URL strings.
+  'file[]':  { type: 'array', items: { type: 'string', format: 'uri' }, description: 'List of uploaded file URLs' },
   json:      { type: 'object' },
   enum:      { type: 'string' },
 }
 
 function fieldToJsonSchema(field: FieldDefinition): JSONSchema {
   const base: JSONSchema = { ...TYPE_MAP[field.type] }
+  // Deep-copy nested `items` so callers never share the TYPE_MAP reference.
+  if (base.items) base.items = { ...base.items }
   if (field.description) base.description = field.description
   if (field.default !== undefined && field.default !== null) base.default = field.default
   if (field.min !== undefined) base.minimum = field.min
   if (field.max !== undefined) base.maximum = field.max
   if (field.minLength !== undefined) base.minLength = field.minLength
   if (field.maxLength !== undefined) base.maxLength = field.maxLength
+  // Surface enum members so clients get a closed set instead of a bare string.
+  if (field.type === 'enum' && field.values && field.values.length > 0) {
+    base.enum = [...field.values]
+  }
   return base
 }
 
@@ -183,7 +191,7 @@ const DEFAULT_ENDPOINTS: CrudAction[] = ['list', 'create', 'read', 'update', 'de
 
 function buildPaths(
   resource: ResourceDefinition,
-  useSecurity: boolean
+  security: Array<Record<string, string[]>> | undefined,
 ): Record<string, Record<string, unknown>> {
   const plural = toPlural(resource.name)
   const tag = resource.name
@@ -191,7 +199,6 @@ function buildPaths(
   const fullRef = `#/components/schemas/${resource.name}`
   const createRef = `#/components/schemas/Create${resource.name}`
   const updateRef = `#/components/schemas/Update${resource.name}`
-  const security = useSecurity ? [{ bearerAuth: [] as string[] }] : undefined
 
   const collectionPath: Record<string, unknown> = {}
   const itemPath: Record<string, unknown> = {}
@@ -291,15 +298,51 @@ function buildPaths(
 
 // ── Security schemes ──────────────────────────────────────────────────────────
 
+/**
+ * Detects which auth schemes the spec activates, across BOTH the legacy
+ * (`strategy`) and modern (`jwt.enabled` / `apikey.enabled` / `oauth`) shapes.
+ * OAuth issues JWT bearer tokens, so it maps onto `bearerAuth`.
+ */
+function detectAuthSchemes(spec: ZeroAPISpec): { bearer: boolean; apiKey: boolean } {
+  const auth = spec.auth
+  if (!auth) return { bearer: false, apiKey: false }
+  const bearer =
+    auth.strategy === 'jwt' ||
+    auth.strategy === 'bearer' ||
+    auth.jwt?.enabled === true ||
+    (auth.oauth?.providers?.length ?? 0) > 0
+  const apiKey = auth.strategy === 'apikey' || auth.apikey?.enabled === true
+  return { bearer, apiKey }
+}
+
 function buildSecuritySchemes(spec: ZeroAPISpec): Record<string, unknown> | undefined {
-  if (!spec.auth) return undefined
-  if (spec.auth.strategy === 'jwt' || spec.auth.strategy === 'bearer') {
-    return { bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' } }
+  const { bearer, apiKey } = detectAuthSchemes(spec)
+  const schemes: Record<string, unknown> = {}
+  if (bearer) schemes.bearerAuth = { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }
+  if (apiKey) {
+    schemes.apiKeyAuth = {
+      type: 'apiKey',
+      in: 'header',
+      name: spec.auth?.apikey?.header ?? spec.auth?.header ?? 'X-API-Key',
+    }
   }
-  if (spec.auth.strategy === 'apikey') {
-    return { apiKeyAuth: { type: 'apiKey', in: 'header', name: spec.auth.header ?? 'Authorization' } }
-  }
-  return undefined
+  return Object.keys(schemes).length > 0 ? schemes : undefined
+}
+
+/**
+ * Builds the OpenAPI `security` requirement list — only ever referencing schemes
+ * that `buildSecuritySchemes` actually defines, so the document is never
+ * internally inconsistent (a requirement naming an undefined scheme is invalid
+ * per the OpenAPI spec). Multiple entries express OR semantics (any one works).
+ */
+function buildSecurityRequirement(
+  spec: ZeroAPISpec,
+): Array<Record<string, string[]>> | undefined {
+  const { bearer, apiKey } = detectAuthSchemes(spec)
+  const req: Array<Record<string, string[]>> = []
+  if (bearer) req.push({ bearerAuth: [] })
+  if (apiKey) req.push({ apiKeyAuth: [] })
+  return req.length > 0 ? req : undefined
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -312,11 +355,13 @@ export function generateOpenAPISpec(spec: ZeroAPISpec): OpenAPISpec {
   const schemas: Record<string, JSONSchema> = {}
   let paths: Record<string, Record<string, unknown>> = {}
 
+  const securityRequirement = buildSecurityRequirement(spec)
+
   for (const resource of spec.resources) {
     schemas[resource.name] = buildFullSchema(resource)
     schemas[`Create${resource.name}`] = buildCreateSchema(resource)
     schemas[`Update${resource.name}`] = buildUpdateSchema(resource)
-    paths = { ...paths, ...buildPaths(resource, !!spec.auth) }
+    paths = { ...paths, ...buildPaths(resource, securityRequirement) }
   }
 
   const servers: OpenAPIServer[] = [
@@ -340,6 +385,6 @@ export function generateOpenAPISpec(spec: ZeroAPISpec): OpenAPISpec {
       schemas,
       ...(securitySchemes ? { securitySchemes } : {}),
     },
-    ...(spec.auth ? { security: [{ bearerAuth: [] }] } : {}),
+    ...(securityRequirement ? { security: securityRequirement } : {}),
   }
 }
