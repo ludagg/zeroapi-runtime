@@ -106,6 +106,8 @@ export { generateRailwayConfig, getRailwayDeployButton } from './deploy/external
 export { generateRenderConfig, getRenderDeployButton } from './deploy/external/render.js'
 export { generateVercelConfig, getVercelDeployButton } from './deploy/external/vercel.js'
 export { generateFlyConfig, getFlyDeployButton } from './deploy/external/flyio.js'
+export { generatePackageJson, getRequiredDependencies } from './deploy/dependencies.js'
+export type { AggregatedDependency, DependencySource, PackageJsonOptions } from './deploy/dependencies.js'
 
 // ── Query ─────────────────────────────────────────────────────────────────────
 export { parseQueryParams, toPrismaQuery } from './query/builder.js'
