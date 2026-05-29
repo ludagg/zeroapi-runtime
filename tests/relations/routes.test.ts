@@ -1,0 +1,214 @@
+import { describe, it, expect } from 'vitest'
+import { createRuntime } from '../../src/index.js'
+import type { ZeroAPISpec } from '../../src/types/spec.js'
+
+const relSpec: ZeroAPISpec = {
+  version: '1.0.0',
+  name: 'relations-routes-test',
+  resources: [
+    {
+      name: 'Author',
+      fields: { name: { type: 'string', required: true } },
+    },
+    {
+      name: 'Book',
+      fields: { title: { type: 'string', required: true } },
+      relations: [
+        { type: 'manyToOne', resource: 'Author', field: 'authorId', required: false },
+      ],
+    },
+    {
+      name: 'Category',
+      fields: { label: { type: 'string', required: true } },
+    },
+    {
+      name: 'Article',
+      fields: { headline: { type: 'string', required: true } },
+      relations: [
+        {
+          type: 'manyToMany',
+          resource: 'Category',
+          through: 'article_categories',
+          fields: { position: { type: 'integer' } },
+        },
+      ],
+    },
+  ],
+}
+
+const { app } = createRuntime(relSpec, { enableLogging: false, enableDocs: false })
+
+describe('Relations in routes', () => {
+  let authorId: string
+  let bookId: string
+  let cat1Id: string
+  let articleId: string
+
+  it('creates an Author', async () => {
+    const res = await app.request('/authors', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Jane Austen' }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json() as { data: { id: string } }
+    authorId = body.data.id
+  })
+
+  it('creates a Book with FK authorId', async () => {
+    const res = await app.request('/books', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Pride and Prejudice', authorId }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json() as { data: { id: string; authorId: string } }
+    bookId = body.data.id
+    expect(body.data.authorId).toBe(authorId)
+  })
+
+  it('GET /books?include=author resolves manyToOne', async () => {
+    const res = await app.request(`/books?include=Author`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { data: Array<{ author: { name: string } }> }
+    expect(body.data[0]?.author?.name).toBe('Jane Austen')
+  })
+
+  it('GET /books/:id?include=author resolves on single item', async () => {
+    const res = await app.request(`/books/${bookId}?include=Author`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { data: { author: { name: string } } }
+    expect(body.data.author?.name).toBe('Jane Austen')
+  })
+
+  it('creates Categories', async () => {
+    const res = await app.request('/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: 'Fiction' }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json() as { data: { id: string } }
+    cat1Id = body.data.id
+  })
+
+  it('creates Article with nested categories (manyToMany)', async () => {
+    const res = await app.request('/articles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        headline: 'Breaking News',
+        categories: [{ categoryId: cat1Id, position: 1 }],
+      }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json() as { data: { id: string } }
+    articleId = body.data.id
+
+    // Verify the join record was actually created, not just the main article
+    const check = await app.request(`/articles/${articleId}?include=Category`)
+    const checkBody = await check.json() as { data: { category: Array<{ label: string }> } }
+    expect(checkBody.data.category).toHaveLength(1)
+    expect(checkBody.data.category[0]?.label).toBe('Fiction')
+  })
+
+  it('GET /articles?include=category resolves manyToMany', async () => {
+    const res = await app.request('/articles?include=Category')
+    expect(res.status).toBe(200)
+    const body = await res.json() as { data: Array<{ headline: string; category: Array<{ label: string }> }> }
+    const article = body.data.find((a) => a.headline === 'Breaking News')
+    expect(article).toBeDefined()
+    // Must be a non-empty array, not just any array (Array.isArray([]) would trivially pass)
+    expect(article?.category.length).toBeGreaterThan(0)
+    expect(article?.category[0]?.label).toBe('Fiction')
+  })
+
+  it('returns 400 for an unknown include param', async () => {
+    const res = await app.request('/books?include=nonexistent')
+    expect(res.status).toBe(400)
+    const body = await res.json() as { error: string }
+    expect(body.error).toBe('Unknown relation: nonexistent')
+  })
+
+  it('GET /authors?include= with oneToMany resolves books array', async () => {
+    // Add oneToMany relation to the spec by creating a new runtime
+    const specWithOneToMany: ZeroAPISpec = {
+      version: '1.0.0', name: 'one-to-many-test',
+      resources: [
+        {
+          name: 'Writer',
+          fields: { name: { type: 'string', required: true } },
+          relations: [{ type: 'oneToMany', resource: 'Novel' }],
+        },
+        {
+          name: 'Novel',
+          fields: { title: { type: 'string', required: true } },
+          relations: [{ type: 'manyToOne', resource: 'Writer', field: 'writerId' }],
+        },
+      ],
+    }
+    const { app: a } = createRuntime(specWithOneToMany, { enableLogging: false, enableDocs: false })
+
+    const wr = await a.request('/writers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Tolkien' }) })
+    const { data: { id: wId } } = await wr.json() as { data: { id: string } }
+
+    await a.request('/novels', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'LOTR', writerId: wId }) })
+
+    const res = await a.request('/writers?include=Novel')
+    const body = await res.json() as { data: Array<{ novel: unknown[] }> }
+    expect(Array.isArray(body.data[0]?.novel)).toBe(true)
+    expect((body.data[0]?.novel as unknown[]).length).toBeGreaterThan(0)
+  })
+})
+
+describe('List with filtering and sorting', () => {
+  it('GET /books?title[contains]=pride filters correctly', async () => {
+    const res = await app.request('/books?title[contains]=pride')
+    const body = await res.json() as { data: Array<{ title: string }>; count: number }
+    expect(body.count).toBeGreaterThan(0)
+    // Every returned item must actually match the filter — not just a non-zero count
+    expect(body.data.every((b) => b.title.toLowerCase().includes('pride'))).toBe(true)
+  })
+
+  it('GET /books?sort=title:asc returns sorted list', async () => {
+    const res = await app.request('/books?sort=title:asc')
+    expect(res.status).toBe(200)
+    const body = await res.json() as { data: Array<{ title: string }> }
+    // Verify actual ascending order, not just a 200 response
+    const titles = body.data.map((b) => b.title)
+    const sorted = [...titles].sort((a, b) => a.localeCompare(b))
+    expect(titles).toEqual(sorted)
+  })
+
+  it('GET /books?limit=1&cursor returns nextCursor', async () => {
+    await app.request('/books', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Emma' }) })
+    const res = await app.request('/books?limit=1')
+    const body = await res.json() as { nextCursor?: string }
+    expect(body.nextCursor).toBeTruthy()
+  })
+})
+
+describe('Atomic nested creation rollback', () => {
+  it('returns 409 and does not persist the main record when a nested M2M id is not found', async () => {
+    const before = await app.request('/articles')
+    const { count: countBefore } = await before.json() as { count: number }
+
+    const res = await app.request('/articles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        headline: 'Ghost Article',
+        categories: [{ categoryId: '00000000-0000-0000-0000-000000000000', position: 1 }],
+      }),
+    })
+    expect(res.status).toBe(409)
+    const errBody = await res.json() as { error: string; details: string }
+    expect(errBody.error).toBe('Nested relation failed')
+    expect(errBody.details).toContain('not found')
+
+    // Main record must not have been committed to the store
+    const after = await app.request('/articles')
+    const { count: countAfter } = await after.json() as { count: number }
+    expect(countAfter).toBe(countBefore)
+  })
+})
