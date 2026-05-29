@@ -1,5 +1,5 @@
 import type { ZeroAPISpec, ResourceDefinition, FieldDefinition, FieldType } from '../types/spec.js'
-import { renderRelationFields } from '../relations/index.js'
+import { renderRelationFields, relationFieldBase, relationLinkName } from '../relations/index.js'
 import { renderWebhookModels } from '../webhooks/schema.js'
 
 const PRISMA_TYPE_MAP: Record<FieldType, string> = {
@@ -286,43 +286,64 @@ function renderApiKeyModel(): string {
 interface UserBackRelation {
   field: string
   model: string
+  /** Explicit @relation name — set only when the owning model has several
+   *  relations to User and the back-relations must be disambiguated. */
+  relationName?: string
 }
 
 /**
  * Collects the back-relations to emit on the User model:
  *   · `owned<Name>s` for resources owned via the ownOnly RBAC injection
- *   · `<name>s` (lowercased plural) for resources that declare an explicit
- *     manyToOne / oneToOne to "User" in their `relations[]`
+ *   · `<name>s` (lowercased plural) for resources that declare a single
+ *     explicit manyToOne / oneToOne to "User" in their `relations[]`
+ *   · one named back-relation PER relation when a resource declares SEVERAL
+ *     relations to User (e.g. `buyerId` + `sellerId`): without distinct field
+ *     names and matching `@relation("…")` names Prisma raises P1012.
  *
- * The two sources are de-duplicated by target model so a resource that is
- * both ownOnly AND explicitly related to User contributes a single field
- * (preferring the explicit relation's plural name).
+ * Explicit relations and ownOnly injection are de-duplicated by target model
+ * so a resource that is both ownOnly AND explicitly related to User contributes
+ * the explicit relation only.
  */
 function collectUserBackRelations(
   resources: ResourceDefinition[],
   ownedResourceNames: string[],
 ): UserBackRelation[] {
-  const byModel = new Map<string, UserBackRelation>()
+  const out: UserBackRelation[] = []
+  const explicitModels = new Set<string>()
 
   for (const resource of resources) {
-    const hasExplicitUserRel = (resource.relations ?? []).some(
+    const userRels = (resource.relations ?? []).filter(
       (rel) =>
         rel.resource === 'User' &&
         (rel.type === 'manyToOne' || rel.type === 'oneToOne'),
     )
-    if (!hasExplicitUserRel) continue
+    if (userRels.length === 0) continue
     const modelName = resource.name.charAt(0).toUpperCase() + resource.name.slice(1)
-    const field = `${resource.name.toLowerCase()}s`
-    byModel.set(modelName, { field, model: modelName })
+    explicitModels.add(modelName)
+
+    if (userRels.length === 1) {
+      out.push({ field: `${resource.name.toLowerCase()}s`, model: modelName })
+    } else {
+      // Multiple relations to User → emit one named back-relation each so the
+      // FK side (rendered with the same name) pairs unambiguously.
+      for (const rel of userRels) {
+        out.push({
+          field: `${relationFieldBase(rel)}${modelName}s`,
+          model: modelName,
+          relationName: relationLinkName(modelName, rel),
+        })
+      }
+    }
   }
 
   for (const name of ownedResourceNames) {
     const modelName = name.charAt(0).toUpperCase() + name.slice(1)
-    if (byModel.has(modelName)) continue
-    byModel.set(modelName, { field: `owned${modelName}s`, model: modelName })
+    if (explicitModels.has(modelName)) continue
+    explicitModels.add(modelName)
+    out.push({ field: `owned${modelName}s`, model: modelName })
   }
 
-  return [...byModel.values()]
+  return out
 }
 
 function renderJwtUserModels(backRelations: UserBackRelation[], includeOAuth: boolean): string[] {
@@ -332,7 +353,8 @@ function renderJwtUserModels(backRelations: UserBackRelation[], includeOAuth: bo
   }
   for (const back of backRelations) {
     // Pad to 13 chars to align with the other User columns.
-    extraLines.push(`  ${back.field.padEnd(13)} ${back.model}[]`)
+    const relClause = back.relationName ? ` @relation("${back.relationName}")` : ''
+    extraLines.push(`  ${back.field.padEnd(13)} ${back.model}[]${relClause}`)
   }
 
   const userModel = `model User {

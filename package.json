@@ -1,6 +1,6 @@
 {
   "name": "@ludagg/zeroapi-runtime",
-  "version": "0.15.2",
+  "version": "0.15.3",
   "description": "Standardized runtime engine for the ZeroAPI platform — consumes a Spec JSON (DSL) and produces a complete, secured, tested Hono.js API",
   "author": "Ludovic Aggaï NGABANG",
   "license": "MIT",
@@ -39,6 +39,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "prisma": "^5.22.0",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^2.0.0"
