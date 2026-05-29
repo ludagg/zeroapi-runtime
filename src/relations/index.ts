@@ -67,30 +67,79 @@ export type SystemResourceResolvers = Record<string, SystemResourceResolver>
 
 // ── Prisma schema helpers ─────────────────────────────────────────────────────
 
+/** FK field name on the owning side of a manyToOne / oneToOne relation. */
+export function fkFieldOf(rel: RelationDefinition): string {
+  return rel.field ?? `${rel.resource.toLowerCase()}Id`
+}
+
+/**
+ * Relation field "base" derived from the FK column by stripping a trailing
+ * `Id` (e.g. `buyerId` → `buyer`, `category_id` → `category`). Used to give
+ * each relation a unique field name when a model has several relations to the
+ * same target. Falls back to the lowercased target name.
+ */
+export function relationFieldBase(rel: RelationDefinition): string {
+  const fk = fkFieldOf(rel)
+  const base = fk.replace(/_?[iI][dD]$/, '')
+  return base.length > 0 ? base : rel.resource.toLowerCase()
+}
+
+/**
+ * Deterministic, schema-unique `@relation("…")` name shared by BOTH endpoints
+ * of a relation that needs disambiguation. `ownerModel` is the PascalCase
+ * model that owns the FK; both sides must emit the identical string or Prisma
+ * cannot pair them (P1012).
+ */
+export function relationLinkName(ownerModel: string, rel: RelationDefinition): string {
+  return `${ownerModel}_${relationFieldBase(rel)}`
+}
+
+/** Owning-side relations (manyToOne / oneToOne) of a resource. */
+function owningRelations(resource: ResourceDefinition): RelationDefinition[] {
+  return (resource.relations ?? []).filter(
+    (r) => r.type === 'manyToOne' || r.type === 'oneToOne',
+  )
+}
+
+/**
+ * Counts, per target model, how many owning-side relations a resource has.
+ * A target reached more than once is "ambiguous" — every relation to it must
+ * carry an explicit, matching `@relation("…")` name on both sides.
+ */
+function owningTargetCounts(resource: ResourceDefinition): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const rel of owningRelations(resource)) {
+    counts.set(rel.resource, (counts.get(rel.resource) ?? 0) + 1)
+  }
+  return counts
+}
+
 export function renderRelationFields(
   resource: ResourceDefinition,
   allResources: ResourceDefinition[]
 ): string[] {
   const lines: string[] = []
+  const sourceModel = snakeToPascal(resource.name)
+  // Targets this resource relates to more than once need named relations.
+  const targetCounts = owningTargetCounts(resource)
 
   for (const rel of resource.relations ?? []) {
     const modelName = rel.resource.charAt(0).toUpperCase() + rel.resource.slice(1)
     const onDelete = rel.onDelete ? `, onDelete: ${rel.onDelete}` : ''
 
     switch (rel.type) {
-      case 'manyToOne': {
-        const fk = rel.field ?? `${rel.resource.toLowerCase()}Id`
-        const opt = rel.required ? '' : '?'
-        lines.push(`  ${fk.padEnd(14)}String${opt}`)
-        lines.push(`  ${rel.resource.toLowerCase().padEnd(14)}${modelName}${opt}   @relation(fields: [${fk}], references: [id]${onDelete})`)
-        break
-      }
+      case 'manyToOne':
       case 'oneToOne': {
-        // Owned side: has the FK
-        const fk = rel.field ?? `${rel.resource.toLowerCase()}Id`
+        const fk = fkFieldOf(rel)
         const opt = rel.required ? '' : '?'
-        lines.push(`  ${fk.padEnd(14)}String${opt} @unique`)
-        lines.push(`  ${rel.resource.toLowerCase().padEnd(14)}${modelName}${opt}   @relation(fields: [${fk}], references: [id]${onDelete})`)
+        const ambiguous = (targetCounts.get(rel.resource) ?? 0) > 1
+        // Distinct field name per relation when the target repeats, so we never
+        // emit two `user User` fields on the same model.
+        const fieldName = ambiguous ? relationFieldBase(rel) : rel.resource.toLowerCase()
+        const nameArg = ambiguous ? `"${relationLinkName(sourceModel, rel)}", ` : ''
+        const fkUnique = rel.type === 'oneToOne' ? ' @unique' : ''
+        lines.push(`  ${fk.padEnd(14)}String${opt}${fkUnique}`)
+        lines.push(`  ${fieldName.padEnd(14)}${modelName}${opt}   @relation(${nameArg}fields: [${fk}], references: [id]${onDelete})`)
         break
       }
       case 'oneToMany': {
@@ -107,20 +156,28 @@ export function renderRelationFields(
     }
   }
 
-  // Add reverse oneToMany fields from other resources pointing here
+  // Reverse (back-relation) array fields for OTHER resources' owning-side
+  // relations that point here. When a single `other` model owns several FK
+  // relations to this resource, the back-relations are ambiguous: each needs a
+  // unique field name and the matching @relation("…") name so both sides pair.
   for (const other of allResources) {
     if (other.name === resource.name) continue
-    for (const rel of other.relations ?? []) {
-      if (rel.resource !== resource.name) continue
-      if (rel.type === 'manyToOne' || rel.type === 'oneToOne') {
-        // This resource is the "one" side — add an array back-reference
+    const otherModel = other.name.charAt(0).toUpperCase() + other.name.slice(1)
+    const incoming = owningRelations(other).filter((r) => r.resource === resource.name)
+    const ambiguous = incoming.length > 1
+
+    for (const rel of incoming) {
+      if (ambiguous) {
+        const field = `${relationFieldBase(rel)}${otherModel}s`
+        // Guarantee ≥1 space so a 14-char field name never glues to the type.
+        lines.push(`  ${field.padEnd(Math.max(14, field.length + 1))}${otherModel}[] @relation("${relationLinkName(otherModel, rel)}")`)
+      } else {
+        // Skip when this resource already declares the inverse oneToMany / m2m.
         const alreadyDeclared = resource.relations?.some(
-          (r) => r.resource === other.name && (r.type === 'oneToMany' || r.type === 'manyToMany')
+          (r) => r.resource === other.name && (r.type === 'oneToMany' || r.type === 'manyToMany'),
         )
-        if (!alreadyDeclared) {
-          const otherModel = other.name.charAt(0).toUpperCase() + other.name.slice(1)
-          lines.push(`  ${other.name.toLowerCase()}s${' '.repeat(Math.max(0, 13 - other.name.length))} ${otherModel}[]`)
-        }
+        if (alreadyDeclared) continue
+        lines.push(`  ${other.name.toLowerCase()}s${' '.repeat(Math.max(0, 13 - other.name.length))} ${otherModel}[]`)
       }
     }
   }
