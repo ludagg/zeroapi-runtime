@@ -1,4 +1,4 @@
-import type { ResourceStore, ResourceStoreProvider } from './resource-store.js'
+import type { ResourceStore, ResourceStoreProvider, ReadOptions, PrismaInclude } from './resource-store.js'
 
 /**
  * The slice of a Prisma model delegate we rely on for basic CRUD. Structural,
@@ -7,8 +7,8 @@ import type { ResourceStore, ResourceStoreProvider } from './resource-store.js'
  * the same trick used by `PrismaApiKeyStore`'s `PrismaApiKeyDelegate`.
  */
 export interface PrismaResourceDelegate {
-  findMany(args?: unknown): Promise<Array<Record<string, unknown>>>
-  findUnique(args: { where: { id: string } }): Promise<Record<string, unknown> | null>
+  findMany(args?: { include?: PrismaInclude }): Promise<Array<Record<string, unknown>>>
+  findUnique(args: { where: { id: string }; include?: PrismaInclude }): Promise<Record<string, unknown> | null>
   create(args: { data: Record<string, unknown> }): Promise<Record<string, unknown>>
   update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<Record<string, unknown>>
   delete(args: { where: { id: string } }): Promise<Record<string, unknown>>
@@ -74,12 +74,14 @@ export class PrismaResourceStore implements ResourceStore {
     return delegate
   }
 
-  async list(): Promise<Array<Record<string, unknown>>> {
-    return this.delegate().findMany()
+  async list(opts?: ReadOptions): Promise<Array<Record<string, unknown>>> {
+    return this.delegate().findMany(opts?.include ? { include: opts.include } : undefined)
   }
 
-  async get(id: string): Promise<Record<string, unknown> | undefined> {
-    const row = await this.delegate().findUnique({ where: { id } })
+  async get(id: string, opts?: ReadOptions): Promise<Record<string, unknown> | undefined> {
+    const row = await this.delegate().findUnique(
+      opts?.include ? { where: { id }, include: opts.include } : { where: { id } },
+    )
     return row ?? undefined
   }
 
@@ -126,6 +128,11 @@ export class PrismaResourceStoreProvider implements ResourceStoreProvider {
     private readonly client: PrismaResourceLikeClient,
     private readonly fallback?: ResourceStoreProvider,
   ) {}
+
+  /** The Prisma client — enables native `include` / `$transaction` paths. */
+  prismaClient(): PrismaResourceLikeClient | undefined {
+    return this.client
+  }
 
   for(resourceName: string): ResourceStore {
     const delegateName = prismaResourceDelegateName(resourceName)

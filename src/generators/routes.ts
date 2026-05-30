@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { randomUUID } from 'crypto'
 import type { Context, MiddlewareHandler } from 'hono'
 import type {
-  ZeroAPISpec, ResourceDefinition, CrudAction, CustomEndpointDef, PermissionAction,
+  ZeroAPISpec, ResourceDefinition, CrudAction, CustomEndpointDef, PermissionAction, TxOperation,
 } from '../types/spec.js'
 import type { DataStore, ResourceMap } from '../types/store.js'
 import type { ResourceStore, ResourceStoreProvider } from '../store/resource-store.js'
@@ -23,6 +23,7 @@ import {
   type SystemResourceResolvers,
 } from '../relations/index.js'
 import { executeTransaction } from '../transactions/executor.js'
+import { executePrismaTransaction, type PrismaTransactionalClient } from '../transactions/prisma-executor.js'
 import { processFileFields } from '../upload/index.js'
 import { toPlural } from '../utils/plural.js'
 import { executeHook } from '../hooks/runner.js'
@@ -209,9 +210,17 @@ function buildResourceHandlerBundle(
   const key = resource.name.toLowerCase()
   const lowerName = key
   // Persistence seam: Memory (the shared DataStore map) or Prisma (the DB).
-  // Relations / transactions / custom endpoints still read the raw `store`
-  // map directly — in Memory mode it's the SAME map, so they stay consistent.
   const resourceStore: ResourceStore = provider.for(resource.name)
+  // Prisma client when in Prisma mode — drives the native include + $transaction
+  // paths. Undefined in memory mode (the subsystems keep their in-memory path).
+  const prismaClient = provider.prismaClient?.()
+
+  // Transactions: real `prisma.$transaction` in Prisma mode (ACID, concurrency
+  // safe), the Map-snapshot executor in memory mode. Same TxResult contract.
+  const runTransaction = (ops: TxOperation[], body: Record<string, unknown>) =>
+    prismaClient
+      ? executePrismaTransaction(ops, body, prismaClient as unknown as PrismaTransactionalClient)
+      : executeTransaction(ops, body, store)
 
   const schemas: ResourceSchemas = generateZodSchemas(resource)
   const hasOwnOnly = resourceHasOwnOnly(spec, resource.name)
@@ -370,7 +379,7 @@ function buildResourceHandlerBundle(
     // Transaction check
     const txConfig = resource.transactions?.find((t) => t.trigger === 'POST')
     if (txConfig) {
-      const txResult = await executeTransaction(txConfig.operations, cleanBody, store)
+      const txResult = await runTransaction(txConfig.operations, cleanBody)
       if (!txResult.success) {
         return c.json(
           { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
@@ -458,7 +467,7 @@ function buildResourceHandlerBundle(
 
     const txConfig = resource.transactions?.find((t) => t.trigger === 'PUT')
     if (txConfig) {
-      const txResult = await executeTransaction(txConfig.operations, read.data, store)
+      const txResult = await runTransaction(txConfig.operations, read.data)
       if (!txResult.success) {
         return c.json(
           { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
@@ -525,7 +534,7 @@ function buildResourceHandlerBundle(
 
     const txConfig = resource.transactions?.find((t) => t.trigger === 'DELETE')
     if (txConfig) {
-      const txResult = await executeTransaction(txConfig.operations, { id }, store)
+      const txResult = await runTransaction(txConfig.operations, { id })
       if (!txResult.success) {
         return c.json(
           { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
