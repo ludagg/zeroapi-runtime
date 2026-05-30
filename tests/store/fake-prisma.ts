@@ -197,9 +197,11 @@ export class FakePrismaClient {
       if (sub === false) continue
       const rel = rels.find((r) => r.field === field)
       if (!rel) continue
-      const nested = typeof sub === 'object' && sub !== null
-        ? (sub as { include?: Record<string, unknown> }).include
+      const node = typeof sub === 'object' && sub !== null
+        ? (sub as { include?: Record<string, unknown>; where?: Record<string, unknown> })
         : undefined
+      const nested = node?.include
+      const where = node?.where
       const targetDelegate = this.delegate(rel.target)
       if (rel.kind === 'toOne') {
         const fkVal = row[rel.fk]
@@ -209,6 +211,8 @@ export class FakePrismaClient {
         const id = row['id']
         const children = Array.from(targetDelegate.rows.values())
           .filter((r) => r[rel.fk] === id)
+          // ownOnly: an include `where` (e.g. { userId }) filters the children.
+          .filter((r) => !where || matchesWhere(r, where))
           .map((r) => this.resolveIncludes(rel.target, clone(r), nested))
         row[field] = children
       }

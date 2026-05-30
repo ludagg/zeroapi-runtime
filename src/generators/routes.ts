@@ -282,7 +282,7 @@ function buildResourceHandlerBundle(
     let prismaInclude: PrismaInclude | undefined
     if (query.include.length > 0) {
       if (prismaClient) {
-        const built = buildPrismaInclude(resource, spec, query.include)
+        const built = buildPrismaInclude(resource, spec, query.include, getRequesterIdentity(c).userId)
         if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
         prismaInclude = built.include
       } else {
@@ -334,7 +334,7 @@ function buildResourceHandlerBundle(
     let prismaInclude: PrismaInclude | undefined
     if (query.include.length > 0) {
       if (prismaClient) {
-        const built = buildPrismaInclude(resource, spec, query.include)
+        const built = buildPrismaInclude(resource, spec, query.include, getRequesterIdentity(c).userId)
         if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
         prismaInclude = built.include
       } else {

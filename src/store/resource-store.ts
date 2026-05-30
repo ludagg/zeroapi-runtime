@@ -6,8 +6,14 @@ import type { PrismaResourceLikeClient } from './prisma-resource-store.js'
  * Built from the route's `?include=` param when in Prisma mode and handed to
  * the store so the database resolves relations natively (any depth). The memory
  * store ignores it — relations there are still joined in memory by `applyIncludes`.
+ *
+ * A node may carry a `where` so row-level permissions (ownOnly) on an *included*
+ * relation are enforced by the database (`{ comments: { where: { userId } } }`).
  */
-export type PrismaInclude = Record<string, boolean | { include?: PrismaInclude }>
+export type PrismaInclude = Record<
+  string,
+  boolean | { include?: PrismaInclude; where?: Record<string, unknown> }
+>
 
 /** Per-read options. `include` / `where` only take effect in Prisma mode. */
 export interface ReadOptions {
