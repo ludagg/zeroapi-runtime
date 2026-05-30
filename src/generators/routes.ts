@@ -258,7 +258,7 @@ function buildResourceHandlerBundle(
     // `query.filters` and are still applied in memory by applyQuery.
     let prismaWhere: Record<string, unknown> | undefined
     if (prismaClient) {
-      const { where, remaining } = extractM2MFilters(resource, query.filters)
+      const { where, remaining } = extractM2MFilters(resource, query.filters, spec)
       if (Object.keys(where).length > 0) {
         prismaWhere = where
         query.filters = remaining
