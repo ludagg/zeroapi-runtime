@@ -5,6 +5,28 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1] - 2026-05-30
+
+Patch: **Prisma `@default(...)` function rendering**.
+
+### Fixed
+
+- **`@default(now())` / `uuid()` / `cuid()` / `autoincrement()` are now emitted
+  as Prisma generator functions** (unquoted call form) instead of invalid
+  string literals. A `date` / `datetime` field with a `"now"` default used to
+  render `@default("now")`, which Prisma rejects (*"'now' is not a valid
+  rfc3339 datetime string"*) — breaking `npx prisma generate` at deploy. The
+  default emitter now maps known generator functions per field type
+  (`now` for date/datetime, `uuid`/`cuid` for string-like, `autoincrement` for
+  integer) to their unquoted form, while genuine literals (e.g. an `enum`
+  default `"pending"`) stay quoted.
+
+### Notes
+
+- Regression coverage added, including a `prisma validate` check over a spec
+  with `enrollmentDate` / `issueDate` / `date` defaults. 1066 tests across 69
+  files; `tsc --noEmit` clean.
+
 ## [0.20.0] - 2026-05-30
 
 Declarative business logic, step 3: **relation aggregates**.
