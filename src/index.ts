@@ -216,7 +216,14 @@ export type {
 
 export type { RuntimeResult, RuntimeOptions } from './runtime/index.js'
 export type { ResourceSchemas } from './generators/validation.js'
-export type { DataStore, ResourceStore } from './types/store.js'
+export type { DataStore, ResourceMap } from './types/store.js'
+export type { ResourceStore, ResourceStoreProvider } from './store/resource-store.js'
+export { MemoryResourceStore, MemoryResourceStoreProvider } from './store/resource-store.js'
+export {
+  PrismaResourceStore, PrismaResourceStoreProvider, prismaResourceDelegateName,
+} from './store/prisma-resource-store.js'
+export type { PrismaResourceDelegate, PrismaResourceLikeClient } from './store/prisma-resource-store.js'
+export { tryAutoLoadPrismaResourceClient } from './store/resource-store-autodetect.js'
 export type { OpenAPISpec } from './docs/swagger.js'
 export type { ParsedQuery, FilterMap, SortSpec, PaginationSpec, ParseQueryOptions } from './query/builder.js'
 export type { QueryResult, PaginationMeta, ApplyQueryOptions } from './query/apply.js'

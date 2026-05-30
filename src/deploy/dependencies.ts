@@ -29,7 +29,7 @@ export interface AggregatedDependency {
  * what the generated `package.json` installs.
  */
 const VERSIONS = {
-  runtime: '^0.16.0',
+  runtime: '^0.17.0',
   hono: '^4.0.0',
   // Node HTTP adapter — `serve({ fetch: app.fetch, port })` is what binds the
   // port when the generated API runs via `node dist/index.js`. Hono on its own

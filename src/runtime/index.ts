@@ -51,6 +51,13 @@ import {
 import {
   cascadeSystemResourceDelete, type SystemResourceResolvers, type CascadeResult,
 } from '../relations/index.js'
+import {
+  MemoryResourceStoreProvider, type ResourceStoreProvider,
+} from '../store/resource-store.js'
+import {
+  PrismaResourceStoreProvider, type PrismaResourceLikeClient,
+} from '../store/prisma-resource-store.js'
+import { tryAutoLoadPrismaResourceClient } from '../store/resource-store-autodetect.js'
 
 export interface RuntimeOptions {
   enableLogging?: boolean
@@ -75,7 +82,15 @@ export interface RuntimeOptions {
    * runtime refuses to fall back to memory — pass an explicit store to opt in.
    */
   apiKeyStore?: ApiKeyStore
-  /** Phase 1.1: Prisma client to back the API-key store. Auto-wraps in `PrismaApiKeyStore`. */
+  /**
+   * Phase 1.1: Prisma client to back the API-key store. Auto-wraps in `PrismaApiKeyStore`.
+   *
+   * Persistence chantier: the SAME client also backs the business-resource CRUD
+   * store. When provided (or when a Prisma client is auto-detected via
+   * `DATABASE_URL`), user resources (Product, Todo, ...) are persisted to the
+   * database via `PrismaResourceStore` instead of the volatile in-memory map,
+   * so they survive restarts. Without it, resources stay in memory (dev/test).
+   */
   prisma?: PrismaLikeClient
   /** Phase 1.1: Receives bootstrap log lines instead of console.log. Useful in tests. */
   apiKeyBootstrapLogger?: BootstrapLogger
@@ -221,6 +236,16 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   const startTime = Date.now()
   const app   = new Hono()
   const store: DataStore = new Map()
+
+  // Persistence chantier: resolve the resource-CRUD backend once. Prisma (DB,
+  // durable) when a client is provided / auto-detected, else the in-memory map
+  // (volatile, dev/test default). Mirrors `resolveApiKeyStore`. The raw `store`
+  // map is still threaded to relations / transactions / custom endpoints, which
+  // remain memory-based in this chantier.
+  const resourceStoreProvider: ResourceStoreProvider = resolveResourceStore({
+    store,
+    ...(prisma ? { prisma: prisma as unknown as PrismaResourceLikeClient } : {}),
+  })
 
   // Chantier 2: Request ID — always on (zero cost, maximum observability)
   app.use('*', createRequestIdMiddleware())
@@ -377,7 +402,7 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   }
 
   // Chantier 1: Routes with hooks + custom endpoints
-  generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers, webhookEmitter, systemResolvers)
+  generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers, webhookEmitter, systemResolvers, resourceStoreProvider)
 
   // Chantier 5: Legacy auth flows — only when the new JWT user system is off,
   // since both register the same /auth/* paths.
@@ -449,6 +474,28 @@ function buildInboundSources(
     const override = overrideMap.get(source)
     return override ?? { source, secretEnv: `${source.toUpperCase()}_WEBHOOK_SECRET` }
   })
+}
+
+/**
+ * Pick the resource-CRUD persistence backend, mirroring `resolveApiKeyStore`:
+ *
+ *   1. explicit `prisma` client → PrismaResourceStoreProvider (durable, DB)
+ *   2. auto-detected Prisma when `DATABASE_URL` is set → same
+ *   3. fallback → MemoryResourceStoreProvider over the runtime's `store` map
+ *
+ * The Memory provider wraps the SAME `DataStore` used by relations /
+ * transactions / custom endpoints, so memory mode stays fully consistent.
+ */
+function resolveResourceStore(opts: {
+  store: DataStore
+  prisma?: PrismaResourceLikeClient
+}): ResourceStoreProvider {
+  const memory = new MemoryResourceStoreProvider(opts.store)
+  const client = opts.prisma ?? tryAutoLoadPrismaResourceClient()
+  // Prisma backs every resource whose model it exposes; the memory provider
+  // catches any resource the client doesn't cover (see PrismaResourceStoreProvider).
+  if (client) return new PrismaResourceStoreProvider(client, memory)
+  return memory
 }
 
 /**
