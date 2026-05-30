@@ -5,6 +5,9 @@ import {
   isSystemResourceName,
   isSystemResourceActive,
 } from '../relations/index.js'
+import { toPlural } from '../utils/plural.js'
+
+const NUMERIC_FIELD_TYPES = new Set(['number', 'integer', 'decimal'])
 
 // ── Field ─────────────────────────────────────────────────────────────────────
 
@@ -103,6 +106,13 @@ const StateMachineSchema = z.object({
   transitions: z.array(StateTransitionSchema).min(1),
 })
 
+const AggregateSchema = z.object({
+  name: z.string().min(1),
+  op: z.enum(['count', 'sum', 'avg', 'min', 'max']),
+  relation: z.string().min(1),
+  field: z.string().min(1).optional(),
+})
+
 const ResourceDefinitionSchema = z.object({
   name: z.string().min(1, 'Resource name cannot be empty'),
   description: z.string().optional(),
@@ -118,6 +128,7 @@ const ResourceDefinitionSchema = z.object({
   relations: z.array(RelationDefinitionSchema).optional(),
   transactions: z.array(TransactionConfigSchema).optional(),
   stateMachine: StateMachineSchema.optional(),
+  aggregates: z.array(AggregateSchema).optional(),
   softDelete: z.boolean().optional(),
   timestamps: z.boolean().optional(),
   searchable: z.array(z.string()).optional(),
@@ -456,6 +467,40 @@ function validateSpecLevelBlocks(spec: ZeroAPISpec): string | null {
       }
       if (!vals.has(t.to)) {
         return `stateMachine on "${resource.name}": transition.to "${t.to}" is not a value of enum "${sm.field}"`
+      }
+    }
+  }
+
+  // Aggregates: closed op set; relation must be an existing to-many relation;
+  // field required (+ numeric for sum/avg) except for count.
+  for (const resource of spec.resources) {
+    for (const agg of resource.aggregates ?? []) {
+      const rel = (resource.relations ?? []).find(
+        (r) =>
+          r.type === 'oneToMany' &&
+          (r.resource.toLowerCase() === agg.relation.toLowerCase() ||
+            toPlural(r.resource).toLowerCase() === agg.relation.toLowerCase()),
+      )
+      if (!rel) {
+        return `Aggregate "${agg.name}" on "${resource.name}" references "${agg.relation}", which is not a oneToMany relation of the resource`
+      }
+      if (agg.op === 'count') {
+        if (agg.field) {
+          return `Aggregate "${agg.name}" on "${resource.name}" is a count and must not specify "field"`
+        }
+        continue
+      }
+      // sum / avg / min / max
+      if (!agg.field) {
+        return `Aggregate "${agg.name}" on "${resource.name}" (${agg.op}) requires a "field"`
+      }
+      const child = spec.resources.find((r) => r.name.toLowerCase() === rel.resource.toLowerCase())
+      const childField = child?.fields[agg.field]
+      if (!childField) {
+        return `Aggregate "${agg.name}" on "${resource.name}" references field "${agg.field}" which does not exist on "${rel.resource}"`
+      }
+      if ((agg.op === 'sum' || agg.op === 'avg') && !NUMERIC_FIELD_TYPES.has(childField.type)) {
+        return `Aggregate "${agg.name}" on "${resource.name}" (${agg.op}) requires a numeric field — "${agg.field}" on "${rel.resource}" is "${childField.type}"`
       }
     }
   }

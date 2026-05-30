@@ -24,6 +24,9 @@ import {
 } from '../relations/index.js'
 import { buildPrismaInclude, extractM2MFilters } from '../relations/prisma-include.js'
 import type { PrismaInclude } from '../store/resource-store.js'
+import {
+  partitionIncludes, resolveAggregates, applyAggregates, type PrismaAggregateClient,
+} from '../aggregates/index.js'
 import { executeTransaction } from '../transactions/executor.js'
 import { executePrismaTransaction, type PrismaTransactionalClient } from '../transactions/prisma-executor.js'
 import { checkTransition } from '../state/state-machine.js'
@@ -283,16 +286,19 @@ function buildResourceHandlerBundle(
       }
     }
 
-    // Validate `?include=`. In Prisma mode we translate it to a native include
-    // tree (nested, any depth); in memory mode we keep the 1-level validator.
+    // `?include=` carries both relation includes and opt-in aggregate names.
+    const { relationIncludes, aggregateIncludes } = partitionIncludes(resource, query.include)
+
+    // Validate relation includes. In Prisma mode we translate to a native
+    // include tree (nested); in memory mode we keep the 1-level validator.
     let prismaInclude: PrismaInclude | undefined
-    if (query.include.length > 0) {
+    if (relationIncludes.length > 0) {
       if (prismaClient) {
-        const built = buildPrismaInclude(resource, spec, query.include, getRequesterIdentity(c).userId)
+        const built = buildPrismaInclude(resource, spec, relationIncludes, getRequesterIdentity(c).userId)
         if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
         prismaInclude = built.include
       } else {
-        const include = validateIncludes(query.include, resource)
+        const include = validateIncludes(relationIncludes, resource)
         if (!include.ok) return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
       }
     }
@@ -327,10 +333,19 @@ function buildResourceHandlerBundle(
     const enriched = prismaInclude
       ? data
       : await applyIncludes(
-          data, query.include, resource, spec, store,
+          data, relationIncludes, resource, spec, store,
           { userId: identity.userId },
           systemResolvers,
         )
+
+    // Opt-in aggregates, batched (one query per relation, never per row).
+    if (aggregateIncludes.length > 0) {
+      await applyAggregates(enriched, resolveAggregates(resource, spec, aggregateIncludes), {
+        store,
+        ...(prismaClient ? { prismaClient: prismaClient as unknown as PrismaAggregateClient } : {}),
+      })
+    }
+
     return c.json({
       data: enriched,
       count,
@@ -343,16 +358,17 @@ function buildResourceHandlerBundle(
     const id = c.req.param('id') ?? ''
 
     // Validate `?include=` first so Prisma mode can fetch the row WITH its
-    // relations natively (nested, any depth).
+    // relations natively (nested, any depth). Aggregate names are split out.
     const query = parseQueryParams(new URL(c.req.url))
+    const { relationIncludes, aggregateIncludes } = partitionIncludes(resource, query.include)
     let prismaInclude: PrismaInclude | undefined
-    if (query.include.length > 0) {
+    if (relationIncludes.length > 0) {
       if (prismaClient) {
-        const built = buildPrismaInclude(resource, spec, query.include, getRequesterIdentity(c).userId)
+        const built = buildPrismaInclude(resource, spec, relationIncludes, getRequesterIdentity(c).userId)
         if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
         prismaInclude = built.include
       } else {
-        const include = validateIncludes(query.include, resource)
+        const include = validateIncludes(relationIncludes, resource)
         if (!include.ok) return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
       }
     }
@@ -374,13 +390,21 @@ function buildResourceHandlerBundle(
 
     const identity = getRequesterIdentity(c)
     let enriched: Record<string, unknown> = item
-    if (!prismaInclude && query.include.length > 0) {
+    if (!prismaInclude && relationIncludes.length > 0) {
       const results = await applyIncludes(
-        [item], query.include, resource, spec, store,
+        [item], relationIncludes, resource, spec, store,
         { userId: identity.userId },
         systemResolvers,
       )
       enriched = results[0] ?? item
+    }
+
+    // Opt-in aggregates for the single row (one query per relation).
+    if (aggregateIncludes.length > 0) {
+      await applyAggregates([enriched], resolveAggregates(resource, spec, aggregateIncludes), {
+        store,
+        ...(prismaClient ? { prismaClient: prismaClient as unknown as PrismaAggregateClient } : {}),
+      })
     }
 
     return c.json({ data: enriched })
