@@ -1,4 +1,20 @@
 import type { DataStore, ResourceMap } from '../types/store.js'
+import type { PrismaResourceLikeClient } from './prisma-resource-store.js'
+
+/**
+ * A Prisma-shaped `include` tree (`{ comments: { include: { user: true } } }`).
+ * Built from the route's `?include=` param when in Prisma mode and handed to
+ * the store so the database resolves relations natively (any depth). The memory
+ * store ignores it — relations there are still joined in memory by `applyIncludes`.
+ */
+export type PrismaInclude = Record<string, boolean | { include?: PrismaInclude }>
+
+/** Per-read options. `include` / `where` only take effect in Prisma mode. */
+export interface ReadOptions {
+  include?: PrismaInclude
+  /** Native Prisma `where` (e.g. a many-to-many `some` filter). */
+  where?: Record<string, unknown>
+}
 
 /**
  * Storage abstraction for a SINGLE user-defined resource collection (e.g. all
@@ -11,16 +27,15 @@ import type { DataStore, ResourceMap } from '../types/store.js'
  *
  * Every method is async so that a Prisma-backed implementation can await the
  * database. The handlers fetch the working set via `list()` and then apply
- * filtering / sorting / pagination / `?include=` IN MEMORY, exactly as they did
- * against the raw `Map` — so this first cut keeps behaviour identical while
- * making writes durable. (Pushing filters down into the query engine is a
- * later optimisation, out of scope here.)
+ * filtering / sorting / pagination IN MEMORY. Relation `?include=` is resolved
+ * natively by Prisma (via `ReadOptions.include`) when in Prisma mode, or in
+ * memory by `applyIncludes` otherwise.
  */
 export interface ResourceStore {
   /** Every record in the collection, unordered. */
-  list(): Promise<Array<Record<string, unknown>>>
+  list(opts?: ReadOptions): Promise<Array<Record<string, unknown>>>
   /** A single record by id, or `undefined` when it does not exist. */
-  get(id: string): Promise<Record<string, unknown> | undefined>
+  get(id: string, opts?: ReadOptions): Promise<Record<string, unknown> | undefined>
   /** Persist a brand-new record keyed by `id`. Returns the stored record. */
   create(id: string, data: Record<string, unknown>): Promise<Record<string, unknown>>
   /** Replace the record at `id` with `data`. Returns the stored record. */
@@ -37,6 +52,12 @@ export interface ResourceStore {
 export interface ResourceStoreProvider {
   /** Returns the store backing `resourceName` (e.g. "Product", "OrderItem"). */
   for(resourceName: string): ResourceStore
+  /**
+   * The underlying Prisma client when running in Prisma mode, else `undefined`.
+   * Lets relation/transaction subsystems pick the native Prisma path (real
+   * `include`, `$transaction`) instead of the in-memory implementation.
+   */
+  prismaClient?(): PrismaResourceLikeClient | undefined
 }
 
 /**
@@ -50,11 +71,13 @@ export interface ResourceStoreProvider {
 export class MemoryResourceStore implements ResourceStore {
   constructor(private readonly map: ResourceMap) {}
 
-  async list(): Promise<Array<Record<string, unknown>>> {
+  // `include` is intentionally ignored here — memory-mode relations are resolved
+  // by `applyIncludes` against the shared DataStore, exactly as before.
+  async list(_opts?: ReadOptions): Promise<Array<Record<string, unknown>>> {
     return Array.from(this.map.values())
   }
 
-  async get(id: string): Promise<Record<string, unknown> | undefined> {
+  async get(id: string, _opts?: ReadOptions): Promise<Record<string, unknown> | undefined> {
     return this.map.get(id)
   }
 

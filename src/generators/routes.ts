@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { randomUUID } from 'crypto'
 import type { Context, MiddlewareHandler } from 'hono'
 import type {
-  ZeroAPISpec, ResourceDefinition, CrudAction, CustomEndpointDef, PermissionAction,
+  ZeroAPISpec, ResourceDefinition, CrudAction, CustomEndpointDef, PermissionAction, TxOperation,
 } from '../types/spec.js'
 import type { DataStore, ResourceMap } from '../types/store.js'
 import type { ResourceStore, ResourceStoreProvider } from '../store/resource-store.js'
@@ -22,7 +22,10 @@ import {
   applyIncludes, extractNestedRelations, persistNestedRelations, validateIncludes,
   type SystemResourceResolvers,
 } from '../relations/index.js'
+import { buildPrismaInclude, extractM2MFilters } from '../relations/prisma-include.js'
+import type { PrismaInclude } from '../store/resource-store.js'
 import { executeTransaction } from '../transactions/executor.js'
+import { executePrismaTransaction, type PrismaTransactionalClient } from '../transactions/prisma-executor.js'
 import { processFileFields } from '../upload/index.js'
 import { toPlural } from '../utils/plural.js'
 import { executeHook } from '../hooks/runner.js'
@@ -209,9 +212,17 @@ function buildResourceHandlerBundle(
   const key = resource.name.toLowerCase()
   const lowerName = key
   // Persistence seam: Memory (the shared DataStore map) or Prisma (the DB).
-  // Relations / transactions / custom endpoints still read the raw `store`
-  // map directly — in Memory mode it's the SAME map, so they stay consistent.
   const resourceStore: ResourceStore = provider.for(resource.name)
+  // Prisma client when in Prisma mode — drives the native include + $transaction
+  // paths. Undefined in memory mode (the subsystems keep their in-memory path).
+  const prismaClient = provider.prismaClient?.()
+
+  // Transactions: real `prisma.$transaction` in Prisma mode (ACID, concurrency
+  // safe), the Map-snapshot executor in memory mode. Same TxResult contract.
+  const runTransaction = (ops: TxOperation[], body: Record<string, unknown>) =>
+    prismaClient
+      ? executePrismaTransaction(ops, body, prismaClient as unknown as PrismaTransactionalClient)
+      : executeTransaction(ops, body, store)
 
   const schemas: ResourceSchemas = generateZodSchemas(resource)
   const hasOwnOnly = resourceHasOwnOnly(spec, resource.name)
@@ -241,6 +252,19 @@ function buildResourceHandlerBundle(
       }
     }
 
+    // Prisma mode: pull many-to-many relation filters (e.g. ?hashtag=<id>) out
+    // into a native Prisma `where { some }` clause BEFORE the unknown-field
+    // check (relation names aren't scalar fields). Scalar filters stay in
+    // `query.filters` and are still applied in memory by applyQuery.
+    let prismaWhere: Record<string, unknown> | undefined
+    if (prismaClient) {
+      const { where, remaining } = extractM2MFilters(resource, query.filters)
+      if (Object.keys(where).length > 0) {
+        prismaWhere = where
+        query.filters = remaining
+      }
+    }
+
     // Phase 2.2: reject filters/sorts on fields that don't exist on the resource.
     for (const field of Object.keys(query.filters)) {
       if (!allowedFilterFields.has(field)) {
@@ -253,12 +277,24 @@ function buildResourceHandlerBundle(
       }
     }
 
-    const include = validateIncludes(query.include, resource)
-    if (!include.ok) {
-      return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
+    // Validate `?include=`. In Prisma mode we translate it to a native include
+    // tree (nested, any depth); in memory mode we keep the 1-level validator.
+    let prismaInclude: PrismaInclude | undefined
+    if (query.include.length > 0) {
+      if (prismaClient) {
+        const built = buildPrismaInclude(resource, spec, query.include)
+        if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
+        prismaInclude = built.include
+      } else {
+        const include = validateIncludes(query.include, resource)
+        if (!include.ok) return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
+      }
     }
 
-    let items = await resourceStore.list()
+    const listOpts: { include?: PrismaInclude; where?: Record<string, unknown> } = {}
+    if (prismaInclude) listOpts.include = prismaInclude
+    if (prismaWhere) listOpts.where = prismaWhere
+    let items = await resourceStore.list(Object.keys(listOpts).length > 0 ? listOpts : undefined)
     if (parent) {
       items = items.filter((item) => item[parent.field] === parent.value)
     }
@@ -273,11 +309,14 @@ function buildResourceHandlerBundle(
       ...(spec.features ? { features: spec.features } : {}),
     })
     const identity = getRequesterIdentity(c)
-    const enriched = await applyIncludes(
-      data, query.include, resource, spec, store,
-      { userId: identity.userId },
-      systemResolvers,
-    )
+    // Prisma already nested the relations; only the memory path needs applyIncludes.
+    const enriched = prismaInclude
+      ? data
+      : await applyIncludes(
+          data, query.include, resource, spec, store,
+          { userId: identity.userId },
+          systemResolvers,
+        )
     return c.json({
       data: enriched,
       count,
@@ -288,10 +327,27 @@ function buildResourceHandlerBundle(
 
   const handleRead = async (c: Context, parent?: ParentScope): Promise<Response> => {
     const id = c.req.param('id') ?? ''
-    const item = await resourceStore.get(id)
+
+    // Validate `?include=` first so Prisma mode can fetch the row WITH its
+    // relations natively (nested, any depth).
+    const query = parseQueryParams(new URL(c.req.url))
+    let prismaInclude: PrismaInclude | undefined
+    if (query.include.length > 0) {
+      if (prismaClient) {
+        const built = buildPrismaInclude(resource, spec, query.include)
+        if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
+        prismaInclude = built.include
+      } else {
+        const include = validateIncludes(query.include, resource)
+        if (!include.ok) return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
+      }
+    }
+
+    const item = await resourceStore.get(id, prismaInclude ? { include: prismaInclude } : undefined)
     if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
-    // Nested: hide cross-parent rows behind 404
+    // Nested: hide cross-parent rows behind 404 (FK columns are present even
+    // when relations are included).
     if (parent && item[parent.field] !== parent.value) {
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
@@ -302,15 +358,9 @@ function buildResourceHandlerBundle(
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
 
-    const query = parseQueryParams(new URL(c.req.url))
-    const include = validateIncludes(query.include, resource)
-    if (!include.ok) {
-      return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
-    }
-
     const identity = getRequesterIdentity(c)
     let enriched: Record<string, unknown> = item
-    if (query.include.length > 0) {
+    if (!prismaInclude && query.include.length > 0) {
       const results = await applyIncludes(
         [item], query.include, resource, spec, store,
         { userId: identity.userId },
@@ -370,7 +420,7 @@ function buildResourceHandlerBundle(
     // Transaction check
     const txConfig = resource.transactions?.find((t) => t.trigger === 'POST')
     if (txConfig) {
-      const txResult = await executeTransaction(txConfig.operations, cleanBody, store)
+      const txResult = await runTransaction(txConfig.operations, cleanBody)
       if (!txResult.success) {
         return c.json(
           { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
@@ -458,7 +508,7 @@ function buildResourceHandlerBundle(
 
     const txConfig = resource.transactions?.find((t) => t.trigger === 'PUT')
     if (txConfig) {
-      const txResult = await executeTransaction(txConfig.operations, read.data, store)
+      const txResult = await runTransaction(txConfig.operations, read.data)
       if (!txResult.success) {
         return c.json(
           { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
@@ -525,7 +575,7 @@ function buildResourceHandlerBundle(
 
     const txConfig = resource.transactions?.find((t) => t.trigger === 'DELETE')
     if (txConfig) {
-      const txResult = await executeTransaction(txConfig.operations, { id }, store)
+      const txResult = await runTransaction(txConfig.operations, { id })
       if (!txResult.success) {
         return c.json(
           { error: 'Transaction failed', details: txResult.error, failedAt: txResult.failedOperation },
