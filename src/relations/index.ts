@@ -234,6 +234,10 @@ export function planResourceRelations(resources: ResourceDefinition[]): Relation
   }
   const createdJoinModels: string[] = []
   const seenThrough = new Set<string>()
+  // Back-relation array lines for self many-to-many joins, emitted directly onto
+  // the self model in section 3 (the generic link mechanism can't disambiguate
+  // two endpoints that share owner+target — that's the P1012 self-M2M bug).
+  const selfM2MBacks: Array<{ model: string; line: string }> = []
 
   // ── 1a. Direct owning relations + synthesised oneToMany children ────────────
   for (const resource of resources) {
@@ -316,6 +320,40 @@ export function planResourceRelations(resources: ResourceDefinition[]): Relation
           isSelf: joinModel === otherModel,
         })
         addExtra(joinModel, `  @@unique([${thisFk}, ${otherFk}])`)
+      } else if (thisModel === otherModel) {
+        // ── self many-to-many (e.g. User follows User via "Follows") ──────────
+        // Both endpoints point at the SAME model, so the two FK columns and the
+        // two relation fields MUST have distinct names plus paired @relation("…")
+        // names — otherwise Prisma rejects the join model (P1012: duplicated
+        // column `xId`, duplicated relation field, `@@id([xId, xId])`).
+        // Handled standalone (no addLink) so the generic algorithm — which keys
+        // links by owner::fk and can't tell the two endpoints apart — is bypassed.
+        const selfLower  = resource.name.toLowerCase()
+        const selfPascal = thisModel
+        const fk1 = thisFkDefault                 // e.g. user2Id
+        const fk2 = `related${selfPascal}Id`      // e.g. relatedUser2Id
+        const field1 = selfLower                  // e.g. user2
+        const field2 = `related${selfPascal}`     // e.g. relatedUser2
+        const rel1 = `${joinModel}_${field1}`     // e.g. Follows_user2
+        const rel2 = `${joinModel}_${field2}`     // e.g. Follows_relatedUser2
+        const onDelete = rel.onDelete ? `, onDelete: ${rel.onDelete}` : ''
+        const extraFields = Object.entries(rel.fields ?? {}).map(([name, field]) => {
+          const prismaType = JOIN_FIELD_TYPE_MAP[field.type] ?? 'String'
+          const opt = field.required ? '' : '?'
+          return `  ${padFieldName(name)}${prismaType}${opt}`
+        })
+        createdJoinModels.push(
+          `model ${joinModel} {\n` +
+          `  ${padFieldName(fk1)}String\n` +
+          `  ${padFieldName(fk2)}String\n` +
+          (extraFields.length ? extraFields.join('\n') + '\n' : '') +
+          `  ${padFieldName(field1)}${selfPascal}  @relation("${rel1}", fields: [${fk1}], references: [id]${onDelete})\n` +
+          `  ${padFieldName(field2)}${selfPascal}  @relation("${rel2}", fields: [${fk2}], references: [id]${onDelete})\n` +
+          `\n  @@id([${fk1}, ${fk2}])\n}`,
+        )
+        const joinLower = joinModel.charAt(0).toLowerCase() + joinModel.slice(1)
+        selfM2MBacks.push({ model: selfPascal, line: `  ${padFieldName(joinLower)}${joinModel}[] @relation("${rel1}")` })
+        selfM2MBacks.push({ model: selfPascal, line: `  ${padFieldName('related' + joinModel)}${joinModel}[] @relation("${rel2}")` })
       } else {
         // Synthetic join model. Its two FK links only drive the back-relation
         // arrays on the endpoints; the model itself is rendered standalone.
@@ -412,6 +450,9 @@ export function planResourceRelations(resources: ResourceDefinition[]): Relation
       push(link.target, `  ${padFieldName(backArrayField(link.owner))}${link.owner}[]`)
     }
   }
+
+  // 3c. Self-M2M back-relation arrays (paired by @relation name with the join).
+  for (const { model, line } of selfM2MBacks) push(model, line)
 
   return { linesByModel, extrasByModel, fkColumnsByModel, createdJoinModels }
 }

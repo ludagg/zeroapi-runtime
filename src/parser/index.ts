@@ -92,10 +92,11 @@ const TransactionConfigSchema = z.object({
 const ResourceDefinitionSchema = z.object({
   name: z.string().min(1, 'Resource name cannot be empty'),
   description: z.string().optional(),
-  fields: z.record(z.string(), FieldDefinitionSchema).refine(
-    (f) => Object.keys(f).length > 0,
-    'Resource must define at least one field'
-  ),
+  // Empty `fields` is allowed for a PURE ASSOCIATION ENTITY — a join/link
+  // resource that carries no scalar payload of its own, only relations (FKs).
+  // The object-level refine below still rejects a resource that has neither
+  // fields nor relations.
+  fields: z.record(z.string(), FieldDefinitionSchema),
   endpoints: z.array(CrudActionSchema).optional(),
   auth: AuthConfigSchema.optional(),
   hooks: ResourceHooksSchema.optional(),
@@ -105,7 +106,10 @@ const ResourceDefinitionSchema = z.object({
   softDelete: z.boolean().optional(),
   timestamps: z.boolean().optional(),
   searchable: z.array(z.string()).optional(),
-})
+}).refine(
+  (r) => Object.keys(r.fields).length > 0 || (r.relations?.length ?? 0) > 0,
+  'Resource must define at least one field or relation',
+)
 
 // ── Global config ─────────────────────────────────────────────────────────────
 
