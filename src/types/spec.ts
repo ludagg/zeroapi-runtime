@@ -152,6 +152,29 @@ export interface StateMachineDef {
   transitions: StateTransition[]
 }
 
+// ── Aggregates ──────────────────────────────────────────────────────────────
+
+/** Closed set of aggregate operators (no custom expressions). */
+export type AggregateOp = 'count' | 'sum' | 'avg' | 'min' | 'max'
+
+/**
+ * A read-only aggregate over a to-many relation, exposed (opt-in) via
+ * `?include=<name>`. `field` is required for sum/avg/min/max and forbidden for
+ * count.
+ *
+ *   { name: 'orderCount', op: 'count', relation: 'orders' }
+ *   { name: 'totalSpent', op: 'sum',   relation: 'orders', field: 'total' }
+ */
+export interface AggregateDef {
+  /** Field name added to the response (e.g. 'orderCount'). */
+  name: string
+  op: AggregateOp
+  /** A to-many relation of this resource (target resource name, singular or plural). */
+  relation: string
+  /** Child field to aggregate — required for sum/avg/min/max, omitted for count. */
+  field?: string
+}
+
 // ── Resource ──────────────────────────────────────────────────────────────────
 
 export interface ResourceDefinition {
@@ -166,6 +189,8 @@ export interface ResourceDefinition {
   transactions?: TransactionConfig[]
   /** Declarative state machine over an enum field (transitions + role gating). */
   stateMachine?: StateMachineDef
+  /** Read-only aggregates over to-many relations, opt-in via `?include=<name>`. */
+  aggregates?: AggregateDef[]
   customEndpoints?: CustomEndpointDef[]
   /** Soft-delete: keep rows and mark a deletedAt column. */
   softDelete?: boolean
