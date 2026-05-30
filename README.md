@@ -4,7 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@ludagg/zeroapi-runtime.svg)](https://www.npmjs.com/package/@ludagg/zeroapi-runtime)
 [![license](https://img.shields.io/npm/l/@ludagg/zeroapi-runtime.svg)](#license)
-[![tests](https://img.shields.io/badge/tests-1026%20passing-brightgreen.svg)](#development)
+[![tests](https://img.shields.io/badge/tests-1047%20passing-brightgreen.svg)](#development)
 
 `@ludagg/zeroapi-runtime` is the standardized runtime engine for the **ZeroAPI** platform. You describe *what* your API contains — resources, fields, relations, auth, permissions — in a declarative **Spec (DSL)**, and the runtime produces a fully wired [Hono](https://hono.dev) application: CRUD routes, Zod validation, authentication, RBAC, OpenAPI docs, and more.
 
@@ -79,9 +79,10 @@ Building a production REST API means writing the same plumbing over and over: ro
 - **Declarative** — one Spec describes the whole API surface.
 - **Batteries included** — auth, RBAC, webhooks, uploads, docs, deploy configs all ship in the box.
 - **Multi-tenant ready** — declare tenant isolation in the spec (`scope` by column ↔ JWT claim); the runtime enforces it on every read/write, no per-route code.
+- **Workflow-ready** — declare state machines (`stateMachine`) over an enum field; the runtime enforces allowed transitions and which roles may perform them.
 - **Portable** — one Hono app for every JS runtime.
 - **Typed** — the Spec is fully typed; generators emit Zod schemas, a Prisma schema, a TypeScript SDK, and an OpenAPI 3.0 document.
-- **Tested** — 1026 tests across 67 files cover every subsystem.
+- **Tested** — 1047 tests across 68 files cover every subsystem.
 - **Incremental** — start in-memory for prototyping, drop in Prisma-backed stores for production with zero route changes.
 
 ---
@@ -187,6 +188,7 @@ Open `http://localhost:3000/docs` for the interactive API reference.
 | **RBAC** | Role hierarchy with transitive inheritance, per-resource read/write/delete guards |
 | **Permissions** | Declarative per-role rules, including row-level `ownOnly` ownership |
 | **Multi-tenant** | Declarative tenant isolation via `scope` (column ↔ JWT claim) — reads scoped, writes forced to the tenant, cross-tenant access 404s |
+| **State machines** | Declarative `stateMachine` on an enum field — allowed transitions + per-role gating, enforced on update (`409`/`403`) |
 | **Security** | Helmet headers, CORS, rate limiting (memory or Redis), JSON sanitisation |
 | **OpenAPI** | 3.0.3 spec at `/openapi.json`, Scalar UI at `/docs` |
 | **Postman** | Generate a Postman v2.1 collection from the spec |
@@ -532,6 +534,40 @@ The runtime then, for that role:
 
 ---
 
+## State machines (workflows)
+
+Declare a `stateMachine` over an existing **enum** field to enforce a workflow:
+which `from → to` transitions are allowed, and which roles may perform them. The
+runtime forces the `initial` state on create and validates every state change on
+update — in both memory and Prisma modes (the current state is read before
+validating).
+
+```ts
+{
+  name: 'Post',
+  fields: { status: { type: 'enum', values: ['draft', 'published', 'archived'], default: 'draft' } },
+  stateMachine: {
+    field: 'status',
+    initial: 'draft',
+    transitions: [
+      { from: 'draft',     to: 'published', roles: ['editor', 'admin'] },
+      { from: 'published', to: 'archived',  roles: ['admin'] },
+      { from: 'archived',  to: 'draft',     roles: ['admin'] },
+    ],
+  },
+}
+```
+
+- **create** — the field is forced to `initial` (a client cannot create a row directly in a later state);
+- **update** changing the field — `from` is the persisted value, `to` the requested one. A transition that isn't listed returns **409**; a listed transition the caller's role isn't allowed to perform returns **403**;
+- **update** not touching the field — unconstrained.
+
+It reuses the existing `enum` and RBAC roles — no new role system. Conditional
+guards ("publish only if X is set") and side-effects (send an email on
+transition) stay in `hooks` / `transactions` / `webhooks`.
+
+---
+
 ## File upload & storage
 
 Enable uploads via `features.fileUpload` and declare `file` / `file[]` fields. Clients send `multipart/form-data`; the runtime validates MIME type and size, stores the file, and persists a URL.
@@ -870,7 +906,7 @@ npm run test:coverage # coverage report
 npm run build         # tsup → dist/ (CJS + ESM + .d.ts)
 ```
 
-**1026 tests across 67 files** cover the parser, generators, query engine, relations, transactions, auth (JWT/API-key/OAuth/flows), RBAC, security, storage, webhooks, observability, env management, and docs.
+**1047 tests across 68 files** cover the parser, generators, query engine, relations, transactions, auth (JWT/API-key/OAuth/flows), RBAC, security, storage, webhooks, observability, env management, and docs.
 
 The project is written in TypeScript, bundled with [tsup](https://tsup.egoist.dev), and tested with [Vitest](https://vitest.dev).
 

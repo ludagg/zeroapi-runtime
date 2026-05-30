@@ -5,6 +5,33 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-05-30
+
+Declarative business logic, step 2: **state machines / workflows**.
+
+### Added
+
+- **Declarative state machines (`stateMachine`)** over an existing enum field:
+  declare the allowed `from → to` transitions and which roles may perform each.
+  - **create** forces the field to `initial` (a client can't create a row
+    directly in a later state);
+  - **update** changing the field validates `from` (the persisted value) → `to`
+    (the requested value): an unlisted transition returns **409**, a listed one
+    the caller's role isn't allowed to perform returns **403**;
+  - **update** not touching the field is unconstrained.
+  Works in both Memory and Prisma modes (the current state is read before
+  validating). Reuses the existing enum + RBAC roles — no new role system.
+- Parser validation: `field` must be an existing enum; `initial` and every
+  `from`/`to` must be a value of that enum.
+
+### Notes
+
+- Conditional guards and side-effects are deliberately out of scope — they stay
+  in `hooks` / `transactions` / `webhooks`.
+- Validated on **real PostgreSQL 16** (`realdb/sm-*`): create-forcing, 200/409/403
+  transitions, and unconstrained non-state updates. 1047 tests across 68 files;
+  `tsc --noEmit` and `prisma validate` clean.
+
 ## [0.18.0] - 2026-05-30
 
 First step of declarative business logic beyond CRUD: **native multi-tenancy**.
