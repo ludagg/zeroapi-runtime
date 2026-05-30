@@ -91,6 +91,17 @@ export interface RelationDefinition {
   /** Extra fields stored on the join table. */
   fields?: Record<string, FieldDefinition>
   onDelete?: 'Cascade' | 'SetNull' | 'Restrict' | 'NoAction'
+  /**
+   * Self many-to-many only: names the FORWARD direction (edges this row owns).
+   * e.g. `as: 'following'`. Enables `?include=following` / `?following=<id>`.
+   */
+  as?: string
+  /**
+   * Self many-to-many only: names the REVERSE direction (edges pointing at this
+   * row). e.g. `reverseAs: 'followers'`. Enables `?include=followers` /
+   * `?followers=<id>`.
+   */
+  reverseAs?: string
 }
 
 // ── Transactions ──────────────────────────────────────────────────────────────
