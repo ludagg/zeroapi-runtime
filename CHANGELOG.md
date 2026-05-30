@@ -5,6 +5,36 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2] - 2026-05-30
+
+Finition of the Prisma-mode subsystems: closes the three minor gaps left by
+0.17.1. **Memory mode is unchanged** — every change is gated behind Prisma mode.
+
+### Fixed
+
+- **ownOnly now applies to *included* relations (Prisma mode).** Native
+  `?include=` bypassed the in-memory ownOnly filtering, so included rows of an
+  ownOnly resource weren't scoped to the requester. `buildPrismaInclude` now
+  injects a row-level `where: { userId }` on ownOnly to-many includes (a
+  no-identity sentinel when unauthenticated, so nothing leaks).
+- **M2M filtering extended to explicit association entities.** Filtering through
+  a join *resource* (e.g. `OrderItem`) now derives the target FK from the join's
+  real relation, so custom FK field names work — not just the synthetic
+  `<target>Id` convention.
+- **Self-M2M directions disambiguated.** A self many-to-many can name both
+  directions via `as` / `reverseAs` (e.g. `following` / `followers`). Includes
+  and filters resolve each direction to the correct join FK and far side
+  (`?include=following`, `?followers=<id>`, …); the schema stays
+  `prisma validate`-clean.
+
+### Verified
+
+- All three fixes validated against **real PostgreSQL 16** with a real
+  `@prisma/client` (see `REAL_DB_TEST.md` + `realdb/`), in addition to the fake.
+  Real-DB note: ownOnly resources carry a genuine `userId → User` FK, which the
+  in-memory fake did not enforce.
+- 1014 tests across 66 files; `tsc --noEmit` clean; `prisma validate` clean.
+
 ## [0.17.1] - 2026-05-30
 
 Builds on the resource persistence introduced in 0.17.0 by wiring the
