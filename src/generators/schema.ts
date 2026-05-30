@@ -15,6 +15,38 @@ const PRISMA_TYPE_MAP: Record<FieldType, string> = {
   enum: 'String',        // enum rendering handled in Phase 1+
 }
 
+/**
+ * Maps a spec default value to a Prisma generator function when the value names
+ * a known function for the given field type. Returns the call expression
+ * (e.g. `now()`) when applicable, or `null` to fall back to a literal.
+ *
+ * Prisma's `@default(...)` distinguishes FUNCTIONS (`now()`, `uuid()`, …) from
+ * literal values (`"pending"`). Emitting `@default("now")` for a DateTime field
+ * makes `prisma generate` fail with "'now' is not a valid rfc3339 datetime
+ * string", so date/datetime "now" defaults must render as the bare `now()`
+ * function — never a quoted string.
+ */
+function prismaDefaultFunction(field: FieldDefinition, value: string): string | null {
+  // Accept both the bare name ("now") and the call form ("now()").
+  const fn = value.replace(/\(\)$/, '')
+  switch (field.type) {
+    case 'date':
+    case 'datetime':
+      return fn === 'now' ? 'now()' : null
+    case 'uuid':
+    case 'string':
+    case 'text':
+      if (fn === 'uuid') return 'uuid()'
+      if (fn === 'cuid') return 'cuid()'
+      return null
+    case 'integer':
+    case 'number':
+      return fn === 'autoincrement' ? 'autoincrement()' : null
+    default:
+      return null
+  }
+}
+
 function renderField(name: string, field: FieldDefinition): string {
   const prismaType = PRISMA_TYPE_MAP[field.type]
   const optional   = field.required ? '' : '?'
@@ -22,10 +54,14 @@ function renderField(name: string, field: FieldDefinition): string {
 
   let defaultClause = ''
   if (field.default !== undefined && field.default !== null) {
-    defaultClause =
-      typeof field.default === 'string'
-        ? ` @default("${field.default}")`
-        : ` @default(${String(field.default)})`
+    if (typeof field.default === 'string') {
+      // A string default is either a Prisma function (rendered unquoted, e.g.
+      // now() / uuid() / cuid()) or a genuine literal (rendered quoted).
+      const fn = prismaDefaultFunction(field, field.default)
+      defaultClause = fn ? ` @default(${fn})` : ` @default("${field.default}")`
+    } else {
+      defaultClause = ` @default(${String(field.default)})`
+    }
   }
 
   // Pad to column 14 for short names; for names ≥ 13 chars guarantee at least
