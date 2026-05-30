@@ -126,6 +126,32 @@ export interface TransactionConfig {
   operations: TxOperation[]
 }
 
+// ── State machine ───────────────────────────────────────────────────────────
+
+/** One allowed state transition, optionally gated by RBAC roles. */
+export interface StateTransition {
+  /** Source state (must be a value of the enum field). */
+  from: string
+  /** Target state (must be a value of the enum field). */
+  to: string
+  /** Roles allowed to perform this transition. Omitted/empty = any role. */
+  roles?: string[]
+}
+
+/**
+ * Declarative state machine over an existing enum field. The runtime forces the
+ * field to `initial` on create and, on update, only allows `from → to` changes
+ * listed in `transitions` (and only for the listed `roles`).
+ */
+export interface StateMachineDef {
+  /** Name of the enum field this machine governs. */
+  field: string
+  /** State assigned at creation. Must be a value of the enum field. */
+  initial: string
+  /** Whitelisted transitions; anything not listed is rejected (409). */
+  transitions: StateTransition[]
+}
+
 // ── Resource ──────────────────────────────────────────────────────────────────
 
 export interface ResourceDefinition {
@@ -138,6 +164,8 @@ export interface ResourceDefinition {
   rbac?: ResourceRBAC
   relations?: RelationDefinition[]
   transactions?: TransactionConfig[]
+  /** Declarative state machine over an enum field (transitions + role gating). */
+  stateMachine?: StateMachineDef
   customEndpoints?: CustomEndpointDef[]
   /** Soft-delete: keep rows and mark a deletedAt column. */
   softDelete?: boolean

@@ -91,6 +91,18 @@ const TransactionConfigSchema = z.object({
   operations: z.array(TxOperationSchema).min(1),
 })
 
+const StateTransitionSchema = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+  roles: z.array(z.string()).optional(),
+})
+
+const StateMachineSchema = z.object({
+  field: z.string().min(1),
+  initial: z.string().min(1),
+  transitions: z.array(StateTransitionSchema).min(1),
+})
+
 const ResourceDefinitionSchema = z.object({
   name: z.string().min(1, 'Resource name cannot be empty'),
   description: z.string().optional(),
@@ -105,6 +117,7 @@ const ResourceDefinitionSchema = z.object({
   rbac: ResourceRBACSchema.optional(),
   relations: z.array(RelationDefinitionSchema).optional(),
   transactions: z.array(TransactionConfigSchema).optional(),
+  stateMachine: StateMachineSchema.optional(),
   softDelete: z.boolean().optional(),
   timestamps: z.boolean().optional(),
   searchable: z.array(z.string()).optional(),
@@ -417,6 +430,32 @@ function validateSpecLevelBlocks(spec: ZeroAPISpec): string | null {
         if (!jwtEnabled) {
           return `Permission rule on "${perm.resource}" uses ${kind} but auth.jwt.enabled is not true — ${kind} requires authenticated users`
         }
+      }
+    }
+  }
+
+  // State machines: field must be an existing enum; initial + every from/to
+  // must be a value of that enum.
+  for (const resource of spec.resources) {
+    const sm = resource.stateMachine
+    if (!sm) continue
+    const field = resource.fields[sm.field]
+    if (!field) {
+      return `stateMachine on "${resource.name}" references unknown field "${sm.field}"`
+    }
+    if (field.type !== 'enum' || !field.values || field.values.length === 0) {
+      return `stateMachine on "${resource.name}" field "${sm.field}" must be an enum field with values`
+    }
+    const vals = new Set(field.values)
+    if (!vals.has(sm.initial)) {
+      return `stateMachine on "${resource.name}": initial "${sm.initial}" is not a value of enum "${sm.field}"`
+    }
+    for (const t of sm.transitions) {
+      if (!vals.has(t.from)) {
+        return `stateMachine on "${resource.name}": transition.from "${t.from}" is not a value of enum "${sm.field}"`
+      }
+      if (!vals.has(t.to)) {
+        return `stateMachine on "${resource.name}": transition.to "${t.to}" is not a value of enum "${sm.field}"`
       }
     }
   }

@@ -26,6 +26,7 @@ import { buildPrismaInclude, extractM2MFilters } from '../relations/prisma-inclu
 import type { PrismaInclude } from '../store/resource-store.js'
 import { executeTransaction } from '../transactions/executor.js'
 import { executePrismaTransaction, type PrismaTransactionalClient } from '../transactions/prisma-executor.js'
+import { checkTransition } from '../state/state-machine.js'
 import { processFileFields } from '../upload/index.js'
 import { toPlural } from '../utils/plural.js'
 import { executeHook } from '../hooks/runner.js'
@@ -237,6 +238,11 @@ function buildResourceHandlerBundle(
 
   const allowedFilterFields = buildAllowedFilterFields(resource)
 
+  // State machine (optional): forces `initial` on create and validates
+  // from→to + role on update. Works in both Memory and Prisma modes since the
+  // current state is read from the resolved store before validating.
+  const sm = resource.stateMachine
+
   const handleList = async (c: Context, parent?: ParentScope): Promise<Response> => {
     const paginationFeature = spec.features?.pagination
     const parseOpts: { defaultLimit?: number; maxLimit?: number } = {}
@@ -387,6 +393,10 @@ function buildResourceHandlerBundle(
     // Nested: force FK from URL, overriding any client-supplied value.
     if (parent) read.data[parent.field] = parent.value
 
+    // State machine: creation always starts at `initial` (a client cannot
+    // create a row directly in a later state).
+    if (sm) read.data[sm.field] = sm.initial
+
     // scope/ownOnly create: force the scope column to the requester's value, so
     // a member of org A cannot write into org B (even if the body says so).
     const ownership = getOwnershipFilter(c)
@@ -506,6 +516,17 @@ function buildResourceHandlerBundle(
     if (!result.success) return validationError(c, result.error.issues)
 
     const updateData: Record<string, unknown> = { ...(result.data as Record<string, unknown>) }
+
+    // State machine: when the update changes the state field, validate the
+    // from→to transition and the requester's role. `from` is the PERSISTED
+    // value (existing), `to` is the requested value.
+    if (sm && updateData[sm.field] !== undefined) {
+      const role = getRequesterIdentity(c).role
+      const verdict = checkTransition(sm, existing[sm.field], updateData[sm.field], role)
+      if (!verdict.ok) {
+        return c.json({ error: verdict.message }, verdict.status)
+      }
+    }
 
     // beforeUpdate hook — can throw to cancel, can mutate updateData
     if (resource.hooks?.beforeUpdate) {
