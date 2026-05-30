@@ -1,6 +1,32 @@
 import { describe, it, expect } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { generatePrismaSchema } from '../../src/generators/schema.js'
 import { sampleSpec, minimalSpec } from '../fixtures/sample-spec.js'
+
+/**
+ * Runs `prisma validate` over a generated schema and returns the combined
+ * output. Throws (failing the test) when validation fails. SQLite is forced as
+ * the datasource provider so validation needs no external DATABASE_URL.
+ */
+function prismaValidate(schema: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'zeroapi-prisma-'))
+  try {
+    const sqliteSchema = schema
+      .replace('provider = "postgresql"', 'provider = "sqlite"')
+      .replace('env("DATABASE_URL")', '"file:./dev.db"')
+    const schemaPath = join(dir, 'schema.prisma')
+    writeFileSync(schemaPath, sqliteSchema)
+    return execFileSync('npx', ['prisma', 'validate', '--schema', schemaPath], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
 
 describe('generatePrismaSchema', () => {
   it('includes datasource and generator blocks', () => {
@@ -158,6 +184,102 @@ describe('generatePrismaSchema', () => {
         .toMatch(/^\s{2}\w+\s+[A-Z]\w*(\[\])?\??/)
     }
   })
+
+  it('emits @default(now()) as a function for datetime "now" defaults, not a string', () => {
+    // Regression: a datetime field with default "now" used to render
+    // @default("now"), which Prisma rejects with
+    // "'now' is not a valid rfc3339 datetime string".
+    const schema = generatePrismaSchema({
+      version: '1.0.0',
+      name: 'now-default-api',
+      resources: [
+        {
+          name: 'Membership',
+          fields: {
+            enrollmentDate: { type: 'datetime', required: true, default: 'now' },
+            issueDate:      { type: 'date',     required: true, default: 'now' },
+            // Call-form should also normalise to the bare function.
+            startedAt:      { type: 'datetime', required: true, default: 'now()' },
+          },
+        },
+      ],
+    })
+
+    const block = schema.match(/model Membership \{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(block).toContain('@default(now())')
+    expect(block).not.toContain('@default("now")')
+    expect(block).not.toContain('@default("now()")')
+    // The three custom date fields render the function form (the 4th match is
+    // the model's auto-generated `createdAt @default(now())`).
+    expect(block.match(/@default\(now\(\)\)/g)?.length).toBe(4)
+    expect(block).toMatch(/enrollmentDate\s+DateTime\s+@default\(now\(\)\)/)
+    expect(block).toMatch(/issueDate\s+DateTime\s+@default\(now\(\)\)/)
+    expect(block).toMatch(/startedAt\s+DateTime\s+@default\(now\(\)\)/)
+  })
+
+  it('emits uuid()/cuid() as functions, not strings', () => {
+    const schema = generatePrismaSchema({
+      version: '1.0.0',
+      name: 'fn-default-api',
+      resources: [
+        {
+          name: 'Token',
+          fields: {
+            publicId: { type: 'uuid',   required: true, default: 'uuid' },
+            slug:     { type: 'string', required: true, default: 'cuid' },
+          },
+        },
+      ],
+    })
+
+    const block = schema.match(/model Token \{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(block).toContain('@default(uuid())')
+    expect(block).toContain('@default(cuid())')
+    expect(block).not.toContain('@default("uuid")')
+    expect(block).not.toContain('@default("cuid")')
+  })
+
+  it('keeps genuine string literals quoted (e.g. enum default)', () => {
+    const schema = generatePrismaSchema({
+      version: '1.0.0',
+      name: 'literal-default-api',
+      resources: [
+        {
+          name: 'Ticket',
+          fields: {
+            status:  { type: 'enum',   required: true, values: ['pending', 'done'], default: 'pending' },
+            // A string field literally named "now" is NOT a function for a string.
+            label:   { type: 'string', required: true, default: 'now' },
+          },
+        },
+      ],
+    })
+
+    const block = schema.match(/model Ticket \{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(block).toContain('@default("pending")')
+    expect(block).toContain('@default("now")')
+  })
+
+  it('produces a schema that passes `prisma validate` for date defaults', () => {
+    const schema = generatePrismaSchema({
+      version: '1.0.0',
+      name: 'date-validate-api',
+      resources: [
+        {
+          name: 'Enrollment',
+          fields: {
+            enrollmentDate: { type: 'datetime', required: true, default: 'now' },
+            issueDate:      { type: 'date',     required: true, default: 'now' },
+            date:           { type: 'datetime', required: false, default: 'now' },
+            status:         { type: 'enum', required: true, values: ['active'], default: 'active' },
+          },
+        },
+      ],
+    })
+
+    const output = prismaValidate(schema)
+    expect(output).toMatch(/valid/i)
+  }, 60_000)
 
   it('does not re-declare a FK field already owned by a relation', () => {
     const schema = generatePrismaSchema({
