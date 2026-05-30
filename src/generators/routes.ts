@@ -22,7 +22,7 @@ import {
   applyIncludes, extractNestedRelations, persistNestedRelations, validateIncludes,
   type SystemResourceResolvers,
 } from '../relations/index.js'
-import { buildPrismaInclude } from '../relations/prisma-include.js'
+import { buildPrismaInclude, extractM2MFilters } from '../relations/prisma-include.js'
 import type { PrismaInclude } from '../store/resource-store.js'
 import { executeTransaction } from '../transactions/executor.js'
 import { executePrismaTransaction, type PrismaTransactionalClient } from '../transactions/prisma-executor.js'
@@ -252,6 +252,19 @@ function buildResourceHandlerBundle(
       }
     }
 
+    // Prisma mode: pull many-to-many relation filters (e.g. ?hashtag=<id>) out
+    // into a native Prisma `where { some }` clause BEFORE the unknown-field
+    // check (relation names aren't scalar fields). Scalar filters stay in
+    // `query.filters` and are still applied in memory by applyQuery.
+    let prismaWhere: Record<string, unknown> | undefined
+    if (prismaClient) {
+      const { where, remaining } = extractM2MFilters(resource, query.filters)
+      if (Object.keys(where).length > 0) {
+        prismaWhere = where
+        query.filters = remaining
+      }
+    }
+
     // Phase 2.2: reject filters/sorts on fields that don't exist on the resource.
     for (const field of Object.keys(query.filters)) {
       if (!allowedFilterFields.has(field)) {
@@ -278,7 +291,10 @@ function buildResourceHandlerBundle(
       }
     }
 
-    let items = await resourceStore.list(prismaInclude ? { include: prismaInclude } : undefined)
+    const listOpts: { include?: PrismaInclude; where?: Record<string, unknown> } = {}
+    if (prismaInclude) listOpts.include = prismaInclude
+    if (prismaWhere) listOpts.where = prismaWhere
+    let items = await resourceStore.list(Object.keys(listOpts).length > 0 ? listOpts : undefined)
     if (parent) {
       items = items.filter((item) => item[parent.field] === parent.value)
     }

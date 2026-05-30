@@ -90,7 +90,7 @@ export class FakeDelegate {
 
   async findMany(args?: { where?: Record<string, unknown>; include?: Record<string, unknown> }): Promise<Row[]> {
     let out = Array.from(this.rows.values())
-    if (args?.where) out = out.filter((r) => matchesWhere(r, args.where!))
+    if (args?.where) out = out.filter((r) => this.client.matchesWhere(this.model, r, args.where!))
     return out.map((r) => this.client.resolveIncludes(this.model, clone(r), args?.include))
   }
 
@@ -164,6 +164,29 @@ export class FakePrismaClient {
     const d = this.delegates.get(model)
     if (!d) throw new Error(`FakePrismaClient: no delegate "${model}"`)
     return d
+  }
+
+  /**
+   * Relation-aware `where` matcher: scalar conditions via `matchesWhere`, plus
+   * to-many relation filters of the form `{ field: { some: <inner> } }` (what
+   * the runtime emits for a many-to-many filter).
+   */
+  matchesWhere(model: string, row: Row, where: Record<string, unknown>): boolean {
+    const rels = this.relations[model] ?? []
+    for (const [key, cond] of Object.entries(where)) {
+      const rel = rels.find((r) => r.field === key)
+      if (rel && cond !== null && typeof cond === 'object' && 'some' in (cond as object)) {
+        const inner = (cond as { some: Record<string, unknown> }).some
+        const targetDelegate = this.delegate(rel.target)
+        const related = rel.kind === 'toMany'
+          ? Array.from(targetDelegate.rows.values()).filter((r) => r[rel.fk] === row['id'])
+          : [targetDelegate.rows.get(row[rel.fk] as string)].filter(Boolean) as Row[]
+        if (!related.some((r) => matchesWhere(r, inner))) return false
+      } else if (!matchesWhere(row, { [key]: cond })) {
+        return false
+      }
+    }
+    return true
   }
 
   /** Resolves a Prisma-style `include` tree against the in-memory rows. */

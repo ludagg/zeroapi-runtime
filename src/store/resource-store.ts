@@ -9,9 +9,11 @@ import type { PrismaResourceLikeClient } from './prisma-resource-store.js'
  */
 export type PrismaInclude = Record<string, boolean | { include?: PrismaInclude }>
 
-/** Per-read options. `include` only takes effect in Prisma mode. */
+/** Per-read options. `include` / `where` only take effect in Prisma mode. */
 export interface ReadOptions {
   include?: PrismaInclude
+  /** Native Prisma `where` (e.g. a many-to-many `some` filter). */
+  where?: Record<string, unknown>
 }
 
 /**

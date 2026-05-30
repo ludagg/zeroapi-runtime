@@ -7,7 +7,7 @@ import type { ResourceStore, ResourceStoreProvider, ReadOptions, PrismaInclude }
  * the same trick used by `PrismaApiKeyStore`'s `PrismaApiKeyDelegate`.
  */
 export interface PrismaResourceDelegate {
-  findMany(args?: { include?: PrismaInclude }): Promise<Array<Record<string, unknown>>>
+  findMany(args?: { include?: PrismaInclude; where?: Record<string, unknown> }): Promise<Array<Record<string, unknown>>>
   findUnique(args: { where: { id: string }; include?: PrismaInclude }): Promise<Record<string, unknown> | null>
   create(args: { data: Record<string, unknown> }): Promise<Record<string, unknown>>
   update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<Record<string, unknown>>
@@ -75,7 +75,10 @@ export class PrismaResourceStore implements ResourceStore {
   }
 
   async list(opts?: ReadOptions): Promise<Array<Record<string, unknown>>> {
-    return this.delegate().findMany(opts?.include ? { include: opts.include } : undefined)
+    const args: { include?: PrismaInclude; where?: Record<string, unknown> } = {}
+    if (opts?.include) args.include = opts.include
+    if (opts?.where && Object.keys(opts.where).length > 0) args.where = opts.where
+    return this.delegate().findMany(Object.keys(args).length > 0 ? args : undefined)
   }
 
   async get(id: string, opts?: ReadOptions): Promise<Record<string, unknown> | undefined> {

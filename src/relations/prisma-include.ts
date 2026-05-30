@@ -1,5 +1,6 @@
-import type { ZeroAPISpec, ResourceDefinition, RelationDefinition } from '../types/spec.js'
+import type { ZeroAPISpec, ResourceDefinition } from '../types/spec.js'
 import type { PrismaInclude } from '../store/resource-store.js'
+import type { FilterMap, FilterCondition } from '../query/builder.js'
 import {
   backArrayField, snakeToPascal, relationFieldBase, isSystemResourceName,
 } from './index.js'
@@ -141,4 +142,54 @@ function ensureNode(parent: PrismaInclude, field: string): PrismaInclude {
 
 function pascal(name: string): string {
   return name.charAt(0).toUpperCase() + name.slice(1)
+}
+
+/**
+ * Splits a parsed filter map into a Prisma `where` for many-to-many relation
+ * filters (e.g. `?hashtag=<id>` → `{ postHashtags: { some: { hashtagId: <id> }}}`)
+ * and the remaining scalar filters (still applied in memory afterwards).
+ *
+ * Only synthetic-join M2M (the common Tag/Hashtag shape) is translated; scalar
+ * filters and any non-M2M key pass through untouched in `remaining`.
+ */
+export function extractM2MFilters(
+  resource: ResourceDefinition,
+  filters: FilterMap,
+): { where: Record<string, unknown>; remaining: FilterMap } {
+  const where: Record<string, unknown> = {}
+  const remaining: FilterMap = {}
+
+  for (const [key, cond] of Object.entries(filters)) {
+    const rel = (resource.relations ?? []).find(
+      (r) => r.type === 'manyToMany' && r.resource.toLowerCase() === key.toLowerCase(),
+    )
+    if (!rel) {
+      remaining[key] = cond
+      continue
+    }
+    const joinModel = snakeToPascal(rel.through ?? `${pascal(resource.name)}${pascal(rel.resource)}`)
+    const joinField = backArrayField(joinModel)
+    const targetFk = `${rel.resource.toLowerCase()}Id`
+    const value = conditionToPrisma(cond)
+    if (value !== undefined) {
+      where[joinField] = { some: { [targetFk]: value } }
+    }
+  }
+
+  return { where, remaining }
+}
+
+/** Maps a parsed FilterCondition to a Prisma scalar filter value. */
+function conditionToPrisma(cond: FilterCondition): unknown {
+  if (cond.eq !== undefined) return cond.eq
+  const out: Record<string, unknown> = {}
+  if (cond.in) out['in'] = cond.in
+  if (cond.notin) out['notIn'] = cond.notin
+  if (cond.ne !== undefined) out['not'] = cond.ne
+  if (cond.gt !== undefined) out['gt'] = cond.gt
+  if (cond.gte !== undefined) out['gte'] = cond.gte
+  if (cond.lt !== undefined) out['lt'] = cond.lt
+  if (cond.lte !== undefined) out['lte'] = cond.lte
+  if (cond.contains !== undefined) out['contains'] = cond.contains
+  return Object.keys(out).length > 0 ? out : undefined
 }
