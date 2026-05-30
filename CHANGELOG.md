@@ -5,6 +5,37 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-05-30
+
+First step of declarative business logic beyond CRUD: **native multi-tenancy**.
+
+### Added
+
+- **Declarative RBAC scope (`scope: { column, claim }`)** — a permission rule can
+  now isolate rows by any column matched against a JWT claim, giving native
+  **multi-tenant** isolation (per organisation / workspace / tenant). Works in
+  both Memory and Prisma modes; in Prisma mode the filter is pushed to the
+  database `where`, so other tenants' rows never leave it.
+  - **read / list** — returns only in-scope rows.
+  - **create** — forces the scope column to the claim value: a member of org A
+    cannot write into org B, even if the request body says so.
+  - **update / delete** — out-of-scope rows return **404** (existence is never
+    leaked); a token missing the claim is **403**.
+- The auth middleware now exposes the full verified JWT payload as `claims`, so
+  scope rules can read arbitrary claims (e.g. `organizationId`).
+
+### Changed
+
+- **`ownOnly` is now a special case of `scope`** (`{ column: 'userId', claim:
+  'sub' }`) — fully backwards-compatible, no spec changes required.
+
+### Verified
+
+- Validated on **real PostgreSQL 16** with a real `@prisma/client`
+  (`realdb/scope-*`): tenant isolation, create-forcing, same-org sharing, and
+  cross-tenant 404. 1026 tests across 67 files (incl. the multi-tenant suite run
+  in both modes); `tsc --noEmit` and `prisma validate` clean.
+
 ## [0.17.2] - 2026-05-30
 
 Finition of the Prisma-mode subsystems: closes the three minor gaps left by

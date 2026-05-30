@@ -4,7 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@ludagg/zeroapi-runtime.svg)](https://www.npmjs.com/package/@ludagg/zeroapi-runtime)
 [![license](https://img.shields.io/npm/l/@ludagg/zeroapi-runtime.svg)](#license)
-[![tests](https://img.shields.io/badge/tests-1014%20passing-brightgreen.svg)](#development)
+[![tests](https://img.shields.io/badge/tests-1026%20passing-brightgreen.svg)](#development)
 
 `@ludagg/zeroapi-runtime` is the standardized runtime engine for the **ZeroAPI** platform. You describe *what* your API contains — resources, fields, relations, auth, permissions — in a declarative **Spec (DSL)**, and the runtime produces a fully wired [Hono](https://hono.dev) application: CRUD routes, Zod validation, authentication, RBAC, OpenAPI docs, and more.
 
@@ -78,9 +78,10 @@ Building a production REST API means writing the same plumbing over and over: ro
 
 - **Declarative** — one Spec describes the whole API surface.
 - **Batteries included** — auth, RBAC, webhooks, uploads, docs, deploy configs all ship in the box.
+- **Multi-tenant ready** — declare tenant isolation in the spec (`scope` by column ↔ JWT claim); the runtime enforces it on every read/write, no per-route code.
 - **Portable** — one Hono app for every JS runtime.
 - **Typed** — the Spec is fully typed; generators emit Zod schemas, a Prisma schema, a TypeScript SDK, and an OpenAPI 3.0 document.
-- **Tested** — 1014 tests across 66 files cover every subsystem.
+- **Tested** — 1026 tests across 67 files cover every subsystem.
 - **Incremental** — start in-memory for prototyping, drop in Prisma-backed stores for production with zero route changes.
 
 ---
@@ -185,6 +186,7 @@ Open `http://localhost:3000/docs` for the interactive API reference.
 | **Auth flows** | Email verification, password reset, refresh rotation, revocation, lockout |
 | **RBAC** | Role hierarchy with transitive inheritance, per-resource read/write/delete guards |
 | **Permissions** | Declarative per-role rules, including row-level `ownOnly` ownership |
+| **Multi-tenant** | Declarative tenant isolation via `scope` (column ↔ JWT claim) — reads scoped, writes forced to the tenant, cross-tenant access 404s |
 | **Security** | Helmet headers, CORS, rate limiting (memory or Redis), JSON sanitisation |
 | **OpenAPI** | 3.0.3 spec at `/openapi.json`, Scalar UI at `/docs` |
 | **Postman** | Generate a Postman v2.1 collection from the spec |
@@ -499,6 +501,34 @@ permissions: [
   },
 ]
 ```
+
+### Multi-tenant scope
+
+`scope` generalises `ownOnly` from a hard-coded `userId` to **any column matched
+against a JWT claim** — the declarative way to isolate tenants (organisations,
+workspaces, …). It works identically in memory and Prisma modes (in Prisma mode
+the filter is pushed to the database, so other tenants' rows never leave it).
+
+```ts
+permissions: [
+  {
+    resource: 'Document',
+    rules: [
+      // a member sees/edits only their organisation's documents
+      { role: 'member', actions: ['create', 'read', 'update', 'delete'],
+        scope: { column: 'organizationId', claim: 'org' } },
+    ],
+  },
+]
+// ownOnly is just sugar for: scope: { column: 'userId', claim: 'sub' }
+```
+
+The runtime then, for that role:
+
+- **read / list** — returns only rows where `organizationId` equals the token's `org` claim;
+- **create** — forces `organizationId` to the claim value (a member of org A cannot write into org B, even if the body says so);
+- **update / delete** — a row outside the caller's scope returns **404** (existence is never leaked);
+- a token missing the `org` claim is rejected with **403**.
 
 ---
 
@@ -840,7 +870,7 @@ npm run test:coverage # coverage report
 npm run build         # tsup → dist/ (CJS + ESM + .d.ts)
 ```
 
-**1014 tests across 66 files** cover the parser, generators, query engine, relations, transactions, auth (JWT/API-key/OAuth/flows), RBAC, security, storage, webhooks, observability, env management, and docs.
+**1026 tests across 67 files** cover the parser, generators, query engine, relations, transactions, auth (JWT/API-key/OAuth/flows), RBAC, security, storage, webhooks, observability, env management, and docs.
 
 The project is written in TypeScript, bundled with [tsup](https://tsup.egoist.dev), and tested with [Vitest](https://vitest.dev).
 
