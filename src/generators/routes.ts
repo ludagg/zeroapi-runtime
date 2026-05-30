@@ -22,6 +22,8 @@ import {
   applyIncludes, extractNestedRelations, persistNestedRelations, validateIncludes,
   type SystemResourceResolvers,
 } from '../relations/index.js'
+import { buildPrismaInclude } from '../relations/prisma-include.js'
+import type { PrismaInclude } from '../store/resource-store.js'
 import { executeTransaction } from '../transactions/executor.js'
 import { executePrismaTransaction, type PrismaTransactionalClient } from '../transactions/prisma-executor.js'
 import { processFileFields } from '../upload/index.js'
@@ -262,12 +264,21 @@ function buildResourceHandlerBundle(
       }
     }
 
-    const include = validateIncludes(query.include, resource)
-    if (!include.ok) {
-      return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
+    // Validate `?include=`. In Prisma mode we translate it to a native include
+    // tree (nested, any depth); in memory mode we keep the 1-level validator.
+    let prismaInclude: PrismaInclude | undefined
+    if (query.include.length > 0) {
+      if (prismaClient) {
+        const built = buildPrismaInclude(resource, spec, query.include)
+        if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
+        prismaInclude = built.include
+      } else {
+        const include = validateIncludes(query.include, resource)
+        if (!include.ok) return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
+      }
     }
 
-    let items = await resourceStore.list()
+    let items = await resourceStore.list(prismaInclude ? { include: prismaInclude } : undefined)
     if (parent) {
       items = items.filter((item) => item[parent.field] === parent.value)
     }
@@ -282,11 +293,14 @@ function buildResourceHandlerBundle(
       ...(spec.features ? { features: spec.features } : {}),
     })
     const identity = getRequesterIdentity(c)
-    const enriched = await applyIncludes(
-      data, query.include, resource, spec, store,
-      { userId: identity.userId },
-      systemResolvers,
-    )
+    // Prisma already nested the relations; only the memory path needs applyIncludes.
+    const enriched = prismaInclude
+      ? data
+      : await applyIncludes(
+          data, query.include, resource, spec, store,
+          { userId: identity.userId },
+          systemResolvers,
+        )
     return c.json({
       data: enriched,
       count,
@@ -297,10 +311,27 @@ function buildResourceHandlerBundle(
 
   const handleRead = async (c: Context, parent?: ParentScope): Promise<Response> => {
     const id = c.req.param('id') ?? ''
-    const item = await resourceStore.get(id)
+
+    // Validate `?include=` first so Prisma mode can fetch the row WITH its
+    // relations natively (nested, any depth).
+    const query = parseQueryParams(new URL(c.req.url))
+    let prismaInclude: PrismaInclude | undefined
+    if (query.include.length > 0) {
+      if (prismaClient) {
+        const built = buildPrismaInclude(resource, spec, query.include)
+        if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
+        prismaInclude = built.include
+      } else {
+        const include = validateIncludes(query.include, resource)
+        if (!include.ok) return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
+      }
+    }
+
+    const item = await resourceStore.get(id, prismaInclude ? { include: prismaInclude } : undefined)
     if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
-    // Nested: hide cross-parent rows behind 404
+    // Nested: hide cross-parent rows behind 404 (FK columns are present even
+    // when relations are included).
     if (parent && item[parent.field] !== parent.value) {
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
@@ -311,15 +342,9 @@ function buildResourceHandlerBundle(
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
 
-    const query = parseQueryParams(new URL(c.req.url))
-    const include = validateIncludes(query.include, resource)
-    if (!include.ok) {
-      return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
-    }
-
     const identity = getRequesterIdentity(c)
     let enriched: Record<string, unknown> = item
-    if (query.include.length > 0) {
+    if (!prismaInclude && query.include.length > 0) {
       const results = await applyIncludes(
         [item], query.include, resource, spec, store,
         { userId: identity.userId },

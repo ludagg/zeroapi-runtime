@@ -131,7 +131,7 @@ function baseFromFk(fk: string, fallbackLower: string): string {
  * FK): a lightly-pluralised, camelCase form of the owner name. `Order` →
  * `orders`, `OrderItem` → `orderItems`, `Category` → `categories`.
  */
-function backArrayField(owner: string): string {
+export function backArrayField(owner: string): string {
   const lower = owner.charAt(0).toLowerCase() + owner.slice(1)
   if (lower.endsWith('s')) return lower
   if (lower.endsWith('y')) return lower.slice(0, -1) + 'ies'
@@ -958,7 +958,7 @@ export function cascadeSystemResourceDelete(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function snakeToPascal(str: string): string {
+export function snakeToPascal(str: string): string {
   return str
     .split(/[_-]/)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
