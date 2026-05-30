@@ -5,6 +5,32 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-05-30
+
+Declarative business logic, step 3: **relation aggregates**.
+
+### Added
+
+- **Declarative aggregates (`aggregates`)** over a `oneToMany` relation —
+  `count` / `sum` / `avg` / `min` / `max`, a closed operator set (no custom
+  expressions). Exposed **opt-in** via `?include=<name>`, so plain reads stay
+  lean. `field` is required for everything except `count`, and must be numeric
+  for `sum` / `avg`.
+- **Batched execution (no N+1)**: for a list of N rows, each relation is
+  resolved with a single Prisma `groupBy` over `fk IN (pageIds)` — the query
+  count grows with the number of distinct relations, never with N. Memory mode
+  folds over the child collection. Both produce identical results.
+
+### Notes
+
+- No schema change (aggregates are computed at read) → `prisma validate`
+  unaffected. Parser validates: relation must be an existing `oneToMany`; `field`
+  required/forbidden per op; `sum`/`avg` fields must be numeric.
+- Validated on **real PostgreSQL 16** (`realdb/agg-*`): values for
+  count/sum/avg/min/max, and the anti-N+1 guarantee proven by counting actual
+  `GROUP BY` queries (22 rows → exactly 2). 1062 tests across 69 files; `tsc
+  --noEmit` clean. Many-to-many aggregates deferred to a follow-up.
+
 ## [0.19.0] - 2026-05-30
 
 Declarative business logic, step 2: **state machines / workflows**.

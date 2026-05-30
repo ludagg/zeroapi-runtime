@@ -4,7 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@ludagg/zeroapi-runtime.svg)](https://www.npmjs.com/package/@ludagg/zeroapi-runtime)
 [![license](https://img.shields.io/npm/l/@ludagg/zeroapi-runtime.svg)](#license)
-[![tests](https://img.shields.io/badge/tests-1047%20passing-brightgreen.svg)](#development)
+[![tests](https://img.shields.io/badge/tests-1062%20passing-brightgreen.svg)](#development)
 
 `@ludagg/zeroapi-runtime` is the standardized runtime engine for the **ZeroAPI** platform. You describe *what* your API contains — resources, fields, relations, auth, permissions — in a declarative **Spec (DSL)**, and the runtime produces a fully wired [Hono](https://hono.dev) application: CRUD routes, Zod validation, authentication, RBAC, OpenAPI docs, and more.
 
@@ -80,9 +80,10 @@ Building a production REST API means writing the same plumbing over and over: ro
 - **Batteries included** — auth, RBAC, webhooks, uploads, docs, deploy configs all ship in the box.
 - **Multi-tenant ready** — declare tenant isolation in the spec (`scope` by column ↔ JWT claim); the runtime enforces it on every read/write, no per-route code.
 - **Workflow-ready** — declare state machines (`stateMachine`) over an enum field; the runtime enforces allowed transitions and which roles may perform them.
+- **Business logic, declared not coded** — multi-tenant scope, state-machine workflows, and relation aggregates (`count`/`sum`/`avg`/`min`/`max`) all live in the spec and run in both memory and Prisma modes.
 - **Portable** — one Hono app for every JS runtime.
 - **Typed** — the Spec is fully typed; generators emit Zod schemas, a Prisma schema, a TypeScript SDK, and an OpenAPI 3.0 document.
-- **Tested** — 1047 tests across 68 files cover every subsystem.
+- **Tested** — 1062 tests across 69 files cover every subsystem.
 - **Incremental** — start in-memory for prototyping, drop in Prisma-backed stores for production with zero route changes.
 
 ---
@@ -189,6 +190,7 @@ Open `http://localhost:3000/docs` for the interactive API reference.
 | **Permissions** | Declarative per-role rules, including row-level `ownOnly` ownership |
 | **Multi-tenant** | Declarative tenant isolation via `scope` (column ↔ JWT claim) — reads scoped, writes forced to the tenant, cross-tenant access 404s |
 | **State machines** | Declarative `stateMachine` on an enum field — allowed transitions + per-role gating, enforced on update (`409`/`403`) |
+| **Aggregates** | Declarative `count` / `sum` / `avg` / `min` / `max` over relations, opt-in via `?include=` — batched (no N+1) |
 | **Security** | Helmet headers, CORS, rate limiting (memory or Redis), JSON sanitisation |
 | **OpenAPI** | 3.0.3 spec at `/openapi.json`, Scalar UI at `/docs` |
 | **Postman** | Generate a Postman v2.1 collection from the spec |
@@ -568,6 +570,40 @@ transition) stay in `hooks` / `transactions` / `webhooks`.
 
 ---
 
+## Aggregates
+
+Declare read-only aggregates over a `oneToMany` relation. They are **opt-in** —
+computed only when their name appears in `?include=`, so plain reads stay lean.
+
+```ts
+{
+  name: 'User',
+  relations: [{ type: 'oneToMany', resource: 'Order' }],
+  aggregates: [
+    { name: 'orderCount', op: 'count', relation: 'orders' },
+    { name: 'totalSpent', op: 'sum',   relation: 'orders', field: 'total' },
+    { name: 'avgOrder',   op: 'avg',   relation: 'orders', field: 'total' },
+  ],
+}
+```
+
+```bash
+curl '/users/123?include=orderCount,totalSpent'
+# → { "data": { "id": "123", "name": "Ada", "orderCount": 3, "totalSpent": 60 } }
+```
+
+- Operators: `count` / `sum` / `avg` / `min` / `max` — a **closed set** (no custom
+  expressions). `field` is required for everything except `count`, and must be
+  numeric for `sum` / `avg`.
+- **Batched, no N+1**: for a list of N rows, each relation is resolved with a
+  single Prisma `groupBy` (`fk IN (pageIds)`) — the query count grows with the
+  number of distinct relations, never with N. In memory mode it folds over the
+  child collection.
+- Rows with no children return `0` for `count`/`sum` and `null` for
+  `avg`/`min`/`max`.
+
+---
+
 ## File upload & storage
 
 Enable uploads via `features.fileUpload` and declare `file` / `file[]` fields. Clients send `multipart/form-data`; the runtime validates MIME type and size, stores the file, and persists a URL.
@@ -906,7 +942,7 @@ npm run test:coverage # coverage report
 npm run build         # tsup → dist/ (CJS + ESM + .d.ts)
 ```
 
-**1047 tests across 68 files** cover the parser, generators, query engine, relations, transactions, auth (JWT/API-key/OAuth/flows), RBAC, security, storage, webhooks, observability, env management, and docs.
+**1062 tests across 69 files** cover the parser, generators, query engine, relations, transactions, auth (JWT/API-key/OAuth/flows), RBAC, security, storage, webhooks, observability, env management, and docs.
 
 The project is written in TypeScript, bundled with [tsup](https://tsup.egoist.dev), and tested with [Vitest](https://vitest.dev).
 
