@@ -2,6 +2,7 @@
 src/
 tests/
 examples/
+realdb/
 
 # Config / tooling
 .github/

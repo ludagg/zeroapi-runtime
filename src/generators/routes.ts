@@ -258,7 +258,7 @@ function buildResourceHandlerBundle(
     // `query.filters` and are still applied in memory by applyQuery.
     let prismaWhere: Record<string, unknown> | undefined
     if (prismaClient) {
-      const { where, remaining } = extractM2MFilters(resource, query.filters)
+      const { where, remaining } = extractM2MFilters(resource, query.filters, spec)
       if (Object.keys(where).length > 0) {
         prismaWhere = where
         query.filters = remaining
@@ -282,7 +282,7 @@ function buildResourceHandlerBundle(
     let prismaInclude: PrismaInclude | undefined
     if (query.include.length > 0) {
       if (prismaClient) {
-        const built = buildPrismaInclude(resource, spec, query.include)
+        const built = buildPrismaInclude(resource, spec, query.include, getRequesterIdentity(c).userId)
         if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
         prismaInclude = built.include
       } else {
@@ -334,7 +334,7 @@ function buildResourceHandlerBundle(
     let prismaInclude: PrismaInclude | undefined
     if (query.include.length > 0) {
       if (prismaClient) {
-        const built = buildPrismaInclude(resource, spec, query.include)
+        const built = buildPrismaInclude(resource, spec, query.include, getRequesterIdentity(c).userId)
         if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
         prismaInclude = built.include
       } else {

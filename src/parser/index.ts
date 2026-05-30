@@ -72,6 +72,8 @@ const RelationDefinitionSchema = z.object({
   through: z.string().optional(),
   fields: z.record(z.string(), FieldDefinitionSchema).optional(),
   onDelete: z.enum(['Cascade', 'SetNull', 'Restrict', 'NoAction']).optional(),
+  as: z.string().min(1).optional(),
+  reverseAs: z.string().min(1).optional(),
 })
 
 // Transactions

@@ -351,9 +351,13 @@ export function planResourceRelations(resources: ResourceDefinition[]): Relation
           `  ${padFieldName(field2)}${selfPascal}  @relation("${rel2}", fields: [${fk2}], references: [id]${onDelete})\n` +
           `\n  @@id([${fk1}, ${fk2}])\n}`,
         )
+        // Direction-named back-arrays when the spec provides `as`/`reverseAs`
+        // (e.g. following / followers); otherwise deterministic defaults.
         const joinLower = joinModel.charAt(0).toLowerCase() + joinModel.slice(1)
-        selfM2MBacks.push({ model: selfPascal, line: `  ${padFieldName(joinLower)}${joinModel}[] @relation("${rel1}")` })
-        selfM2MBacks.push({ model: selfPascal, line: `  ${padFieldName('related' + joinModel)}${joinModel}[] @relation("${rel2}")` })
+        const fwdBack = rel.as ?? joinLower
+        const revBack = rel.reverseAs ?? `related${joinModel}`
+        selfM2MBacks.push({ model: selfPascal, line: `  ${padFieldName(fwdBack)}${joinModel}[] @relation("${rel1}")` })
+        selfM2MBacks.push({ model: selfPascal, line: `  ${padFieldName(revBack)}${joinModel}[] @relation("${rel2}")` })
       } else {
         // Synthetic join model. Its two FK links only drive the back-relation
         // arrays on the endpoints; the model itself is rendered standalone.
