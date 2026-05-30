@@ -4,7 +4,9 @@ import type { Context, MiddlewareHandler } from 'hono'
 import type {
   ZeroAPISpec, ResourceDefinition, CrudAction, CustomEndpointDef, PermissionAction,
 } from '../types/spec.js'
-import type { DataStore, ResourceStore } from '../types/store.js'
+import type { DataStore, ResourceMap } from '../types/store.js'
+import type { ResourceStore, ResourceStoreProvider } from '../store/resource-store.js'
+import { MemoryResourceStoreProvider } from '../store/resource-store.js'
 import type { HandlerFn } from '../hooks/types.js'
 import { generateZodSchemas, type ResourceSchemas } from './validation.js'
 import { createPermissionMiddleware } from '../rbac/permissions.js'
@@ -25,7 +27,8 @@ import { processFileFields } from '../upload/index.js'
 import { toPlural } from '../utils/plural.js'
 import { executeHook } from '../hooks/runner.js'
 
-export type { DataStore, ResourceStore }
+export type { DataStore, ResourceMap }
+export type { ResourceStore, ResourceStoreProvider }
 
 /** Phase 3.3: callback invoked after a successful create/update/delete. */
 export type EmitWebhookFn = (eventType: string, payload: unknown) => void
@@ -195,6 +198,7 @@ interface ResourceHandlerBundle {
 function buildResourceHandlerBundle(
   resource: ResourceDefinition,
   store: DataStore,
+  provider: ResourceStoreProvider,
   spec: ZeroAPISpec,
   authMiddleware?: MiddlewareHandler,
   uploadDir?: string,
@@ -204,8 +208,10 @@ function buildResourceHandlerBundle(
 ): ResourceHandlerBundle {
   const key = resource.name.toLowerCase()
   const lowerName = key
-  if (!store.has(key)) store.set(key, new Map())
-  const getStore = (): ResourceStore => store.get(key) as ResourceStore
+  // Persistence seam: Memory (the shared DataStore map) or Prisma (the DB).
+  // Relations / transactions / custom endpoints still read the raw `store`
+  // map directly — in Memory mode it's the SAME map, so they stay consistent.
+  const resourceStore: ResourceStore = provider.for(resource.name)
 
   const schemas: ResourceSchemas = generateZodSchemas(resource)
   const hasOwnOnly = resourceHasOwnOnly(spec, resource.name)
@@ -252,7 +258,7 @@ function buildResourceHandlerBundle(
       return c.json({ error: `Unknown relation: ${include.unknown}` }, 400)
     }
 
-    let items = Array.from(getStore().values())
+    let items = await resourceStore.list()
     if (parent) {
       items = items.filter((item) => item[parent.field] === parent.value)
     }
@@ -282,7 +288,7 @@ function buildResourceHandlerBundle(
 
   const handleRead = async (c: Context, parent?: ParentScope): Promise<Response> => {
     const id = c.req.param('id') ?? ''
-    const item = getStore().get(id)
+    const item = await resourceStore.get(id)
     if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
     // Nested: hide cross-parent rows behind 404
@@ -391,14 +397,14 @@ function buildResourceHandlerBundle(
       // in the body cannot desync item.id from the store key.
       id, createdAt: now, updatedAt: now,
     }
-    getStore().set(id, item)
+    await resourceStore.create(id, item)
 
     // Persist nested M2M join records atomically — rollback the main record on failure
     if (nested.length > 0) {
       try {
         persistNestedRelations(id, nested, resource, store)
       } catch (err) {
-        getStore().delete(id)
+        await resourceStore.delete(id)
         const message = err instanceof Error ? err.message : String(err)
         return c.json({ error: 'Nested relation failed', details: message }, 409)
       }
@@ -419,7 +425,7 @@ function buildResourceHandlerBundle(
 
   const handleUpdate = async (c: Context, parent?: ParentScope): Promise<Response> => {
     const id = c.req.param('id') ?? ''
-    const existing = getStore().get(id)
+    const existing = await resourceStore.get(id)
     if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
     if (parent && existing[parent.field] !== parent.value) {
@@ -478,7 +484,7 @@ function buildResourceHandlerBundle(
       // Nested: parent FK is sticky — PUT cannot re-parent a child via body.
       ...(parent ? { [parent.field]: parent.value } : {}),
     }
-    getStore().set(id, updated)
+    await resourceStore.update(id, updated)
 
     // afterUpdate hook — fire-and-forget
     if (resource.hooks?.afterUpdate) {
@@ -494,7 +500,7 @@ function buildResourceHandlerBundle(
 
   const handleDelete = async (c: Context, parent?: ParentScope): Promise<Response> => {
     const id = c.req.param('id') ?? ''
-    const existing = getStore().get(id)
+    const existing = await resourceStore.get(id)
     if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
     if (parent && existing[parent.field] !== parent.value) {
@@ -528,7 +534,7 @@ function buildResourceHandlerBundle(
       }
     }
 
-    getStore().delete(id)
+    await resourceStore.delete(id)
 
     // afterDelete hook — fire-and-forget
     if (resource.hooks?.afterDelete) {
@@ -595,6 +601,7 @@ function collectNestedRelations(
 function registerResource(
   resource: ResourceDefinition,
   store: DataStore,
+  provider: ResourceStoreProvider,
   spec: ZeroAPISpec,
   authMiddleware?: MiddlewareHandler,
   uploadDir?: string,
@@ -604,7 +611,7 @@ function registerResource(
 ): { router: Hono; bundle: ResourceHandlerBundle } {
   const endpoints: CrudAction[] = resource.endpoints ?? DEFAULT_ENDPOINTS
   const bundle = buildResourceHandlerBundle(
-    resource, store, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers,
+    resource, store, provider, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers,
   )
   const router = new Hono()
 
@@ -728,14 +735,20 @@ export function generateRoutes(
   handlers: Record<string, HandlerFn> = {},
   emitWebhook?: EmitWebhookFn,
   systemResolvers?: SystemResourceResolvers,
+  resourceStore?: ResourceStoreProvider,
 ): void {
+  // Resolve the persistence backend. When no provider is supplied (e.g. direct
+  // callers / older call sites) we default to an in-memory provider over the
+  // same `store` map — byte-for-byte the historical behaviour.
+  const provider: ResourceStoreProvider = resourceStore ?? new MemoryResourceStoreProvider(store)
+
   // First pass: build flat routes for every resource and remember the bundles
   // so the second pass can mount nested routes on the parent's router.
   const built = new Map<string, { router: Hono; bundle: ResourceHandlerBundle }>()
   for (const resource of spec.resources) {
     built.set(
       resource.name,
-      registerResource(resource, store, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers),
+      registerResource(resource, store, provider, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers),
     )
   }
 
