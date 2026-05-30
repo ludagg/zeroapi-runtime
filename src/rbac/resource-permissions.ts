@@ -15,11 +15,18 @@ export interface RequesterIdentity {
   role: string
   /** Stable identifier for ownership checks. Only set for authenticated users. */
   userId?: string
+  /** Full verified JWT claims, for scope rules reading arbitrary claims. */
+  claims?: Record<string, unknown>
 }
 
-/** Ownership context surfaced to route handlers when a matched rule has ownOnly. */
+/**
+ * Row-level scope surfaced to route handlers when a matched rule has ownOnly or
+ * scope: rows are restricted to those where `column` equals `value`.
+ * (ownOnly is the special case `{ column: 'userId', value: <sub> }`.)
+ */
 export interface OwnershipFilter {
-  userId: string
+  column: string
+  value: string
 }
 
 /** Returns true when any auth strategy is activated on the spec. */
@@ -42,13 +49,13 @@ function getApiKeyContext(c: Context): { role?: unknown } | undefined {
   try { return c.get('apiKey') as { role?: unknown } | undefined } catch { return undefined }
 }
 
-function getUserContext(c: Context): { sub?: unknown; role?: unknown } | undefined {
-  try { return c.get('user') as { sub?: unknown; role?: unknown } | undefined } catch { return undefined }
+function getUserContext(c: Context): { sub?: unknown; role?: unknown; claims?: unknown } | undefined {
+  try { return c.get('user') as { sub?: unknown; role?: unknown; claims?: unknown } | undefined } catch { return undefined }
 }
 
 /**
- * Resolves the requester's role + userId from whichever auth path succeeded.
- * Falls back to 'anonymous' when no auth context is present.
+ * Resolves the requester's role + userId (+ JWT claims) from whichever auth path
+ * succeeded. Falls back to 'anonymous' when no auth context is present.
  */
 export function getRequesterIdentity(c: Context): RequesterIdentity {
   const user = getUserContext(c)
@@ -56,6 +63,9 @@ export function getRequesterIdentity(c: Context): RequesterIdentity {
     return {
       role: typeof user.role === 'string' && user.role.length > 0 ? user.role : 'user',
       userId: user.sub,
+      ...(user.claims && typeof user.claims === 'object'
+        ? { claims: user.claims as Record<string, unknown> }
+        : {}),
     }
   }
   const apiKey = getApiKeyContext(c)
@@ -164,16 +174,21 @@ export function buildResourcePermissionGuard(
         const rule = findRuleForRole(matchingRules, identity.role)
 
         if (rule) {
-          if (rule.ownOnly) {
-            if (!identity.userId) {
-              return c.json(
-                { error: 'ownOnly rules require a user identity (JWT) — API keys cannot own rows' },
-                403,
-              )
-            }
-            const filter: OwnershipFilter = { userId: identity.userId }
-            c.set('ownershipFilter', filter)
+          const ownership = resolveOwnership(rule, identity)
+          if (ownership === 'missing-identity') {
+            return c.json(
+              { error: 'ownOnly rules require a user identity (JWT) — API keys cannot own rows' },
+              403,
+            )
           }
+          if (ownership === 'missing-claim') {
+            const claim = rule.scope?.claim ?? 'sub'
+            return c.json(
+              { error: `Forbidden — the request identity lacks the '${claim}' claim required to scope ${resource.name}` },
+              403,
+            )
+          }
+          if (ownership) c.set('ownershipFilter', ownership)
           await next()
           return
         }
@@ -207,6 +222,29 @@ export function buildResourcePermissionGuard(
     }
     return c.json({ error: 'Authentication required' }, 401)
   }
+}
+
+type OwnershipResolution = OwnershipFilter | undefined | 'missing-identity' | 'missing-claim'
+
+/**
+ * Resolves the row-level scope for a matched rule:
+ *   - scope   → { column, value: <claim value> } (claim defaults to 'sub')
+ *   - ownOnly → { column: 'userId', value: <sub> }
+ *   - neither → undefined (no scoping)
+ * Returns a sentinel when the required identity/claim is absent.
+ */
+function resolveOwnership(rule: PermissionRule, identity: RequesterIdentity): OwnershipResolution {
+  if (rule.scope) {
+    const claim = rule.scope.claim ?? 'sub'
+    const raw = claim === 'sub' ? identity.userId : identity.claims?.[claim]
+    if (raw === undefined || raw === null || raw === '') return 'missing-claim'
+    return { column: rule.scope.column, value: String(raw) }
+  }
+  if (rule.ownOnly) {
+    if (!identity.userId) return 'missing-identity'
+    return { column: 'userId', value: identity.userId }
+  }
+  return undefined
 }
 
 /** Reads the OwnershipFilter previously set by the permission guard, if any. */

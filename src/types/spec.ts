@@ -285,11 +285,31 @@ export interface EnvVarDefinition {
 
 export type PermissionAction = 'create' | 'read' | 'update' | 'delete'
 
+/**
+ * Row-level scope for a permission rule (multi-tenant). Generalises `ownOnly`:
+ * a row is in scope when its `column` equals the value carried by the
+ * requester's JWT `claim`.
+ *
+ *   { column: 'organizationId', claim: 'org' }   // tenant isolation
+ *   { column: 'userId', claim: 'sub' }            // == ownOnly
+ *
+ * On reads the runtime filters to in-scope rows; on create it forces `column`
+ * to the claim value; on update/delete it rejects out-of-scope rows.
+ */
+export interface PermissionScope {
+  /** Resource column to match against the claim value (e.g. 'organizationId'). */
+  column: string
+  /** JWT claim carrying the tenant value (e.g. 'org'). Defaults to 'sub'. */
+  claim?: string
+}
+
 export interface PermissionRule {
   role: string
   actions: PermissionAction[]
-  /** Restrict the rule to rows owned by the requester. */
+  /** Restrict the rule to rows owned by the requester (sugar for scope by userId). */
   ownOnly?: boolean
+  /** Restrict the rule to rows whose `column` matches a JWT claim (multi-tenant). */
+  scope?: PermissionScope
 }
 
 export interface PermissionDefinition {
