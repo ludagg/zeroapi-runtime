@@ -203,10 +203,16 @@ const EnvVarDefinitionSchema = z.object({
   managedByCloud: z.boolean().optional(),
 })
 
+const PermissionScopeSchema = z.object({
+  column: z.string().min(1),
+  claim: z.string().min(1).optional(),
+})
+
 const PermissionRuleSchema = z.object({
   role: z.string().min(1),
   actions: z.array(z.enum(['create', 'read', 'update', 'delete'])).min(1),
   ownOnly: z.boolean().optional(),
+  scope: PermissionScopeSchema.optional(),
 })
 
 const PermissionDefinitionSchema = z.object({
@@ -403,12 +409,13 @@ function validateSpecLevelBlocks(spec: ZeroAPISpec): string | null {
       return `Permission rule references unknown resource "${perm.resource}"`
     }
     for (const rule of perm.rules) {
-      if (rule.ownOnly) {
+      if (rule.ownOnly || rule.scope) {
+        const kind = rule.scope ? 'scope' : 'ownOnly'
         if (rule.role === 'public') {
-          return `Permission rule on "${perm.resource}" uses ownOnly with role "public" — public requesters have no identity to own rows`
+          return `Permission rule on "${perm.resource}" uses ${kind} with role "public" — public requesters have no identity to scope rows`
         }
         if (!jwtEnabled) {
-          return `Permission rule on "${perm.resource}" uses ownOnly but auth.jwt.enabled is not true — ownOnly requires authenticated users`
+          return `Permission rule on "${perm.resource}" uses ${kind} but auth.jwt.enabled is not true — ${kind} requires authenticated users`
         }
       }
     }

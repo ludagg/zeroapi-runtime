@@ -291,17 +291,25 @@ function buildResourceHandlerBundle(
       }
     }
 
+    const ownership = getOwnershipFilter(c)
+
     const listOpts: { include?: PrismaInclude; where?: Record<string, unknown> } = {}
     if (prismaInclude) listOpts.include = prismaInclude
-    if (prismaWhere) listOpts.where = prismaWhere
+    // Row-level scope (ownOnly / multi-tenant) + M2M filters → pushed to Prisma's
+    // `where` so other tenants' rows never leave the database.
+    const where: Record<string, unknown> = { ...(prismaWhere ?? {}) }
+    if (prismaClient && ownership) where[ownership.column] = ownership.value
+    if (Object.keys(where).length > 0) listOpts.where = where
+
     let items = await resourceStore.list(Object.keys(listOpts).length > 0 ? listOpts : undefined)
     if (parent) {
       items = items.filter((item) => item[parent.field] === parent.value)
     }
 
-    const ownership = getOwnershipFilter(c)
+    // In-memory scope filter — authoritative in memory mode, redundant-but-safe
+    // in Prisma mode (the where above already scoped the query).
     if (ownership) {
-      items = items.filter((item) => item['userId'] === ownership.userId)
+      items = items.filter((item) => item[ownership.column] === ownership.value)
     }
 
     const { data, count, nextCursor, pagination } = applyQuery(items, query, {
@@ -352,9 +360,9 @@ function buildResourceHandlerBundle(
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
 
-    // ownOnly: hide non-owned rows behind 404 so existence is not leaked.
+    // scope/ownOnly: hide out-of-scope rows behind 404 so existence isn't leaked.
     const ownership = getOwnershipFilter(c)
-    if (ownership && item['userId'] !== ownership.userId) {
+    if (ownership && item[ownership.column] !== ownership.value) {
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
 
@@ -379,17 +387,18 @@ function buildResourceHandlerBundle(
     // Nested: force FK from URL, overriding any client-supplied value.
     if (parent) read.data[parent.field] = parent.value
 
-    // ownOnly create: requester owns the new row.
+    // scope/ownOnly create: force the scope column to the requester's value, so
+    // a member of org A cannot write into org B (even if the body says so).
     const ownership = getOwnershipFilter(c)
     if (ownership) {
-      read.data['userId'] = ownership.userId
+      read.data[ownership.column] = ownership.value
     }
 
-    // Nested + ownOnly on the parent: when the FK column is the user id itself,
-    // the URL must match the authenticated identity (otherwise the requester
-    // would be creating a row "owned" by someone else through the URL).
-    if (parent && parent.field === 'userId' && ownership && parent.value !== ownership.userId) {
-      return c.json({ error: 'Forbidden — cannot create resources for another user' }, 403)
+    // Nested + scope on the parent: when the FK column IS the scope column, the
+    // URL must match the requester's scope (otherwise the requester would be
+    // creating a row scoped to someone else through the URL).
+    if (parent && ownership && parent.field === ownership.column && parent.value !== ownership.value) {
+      return c.json({ error: 'Forbidden — cannot create resources outside your scope' }, 403)
     }
 
     // Extract nested manyToMany data before validation
@@ -441,8 +450,10 @@ function buildResourceHandlerBundle(
       ...Object.fromEntries(fkFields.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
       // Re-attach file URLs (already uploaded, not part of Zod schema)
       ...Object.fromEntries(fileFieldKeys.map((k) => [k, cleanBody[k]]).filter(([, v]) => v != null)),
-      // ownOnly: pin userId from the authenticated identity (not part of Zod schema).
-      ...(hasOwnOnly && cleanBody['userId'] != null ? { userId: cleanBody['userId'] } : {}),
+      // scope/ownOnly: pin the scope column from the requester (the injected
+      // userId isn't a Zod field; a scope column that IS a field is re-pinned
+      // here too so the body can never override it).
+      ...(ownership ? { [ownership.column]: ownership.value } : {}),
       // Server-managed fields applied last so a client-supplied id/createdAt/updatedAt
       // in the body cannot desync item.id from the store key.
       id, createdAt: now, updatedAt: now,
@@ -482,9 +493,9 @@ function buildResourceHandlerBundle(
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
 
-    // ownOnly: editing someone else's row reports 404, not 403.
+    // scope/ownOnly: editing an out-of-scope row reports 404, not 403.
     const ownership = getOwnershipFilter(c)
-    if (ownership && existing['userId'] !== ownership.userId) {
+    if (ownership && existing[ownership.column] !== ownership.value) {
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
 
@@ -529,8 +540,8 @@ function buildResourceHandlerBundle(
       // and updatedAt is set by the server, so a client-supplied value in the body is ignored.
       id,
       updatedAt: new Date().toISOString(),
-      // ownOnly: ownership can never be transferred via PUT.
-      ...(hasOwnOnly && existing['userId'] != null ? { userId: existing['userId'] } : {}),
+      // scope/ownOnly: the scope column can never be transferred via PUT.
+      ...(ownership && existing[ownership.column] != null ? { [ownership.column]: existing[ownership.column] } : {}),
       // Nested: parent FK is sticky — PUT cannot re-parent a child via body.
       ...(parent ? { [parent.field]: parent.value } : {}),
     }
@@ -557,9 +568,9 @@ function buildResourceHandlerBundle(
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
 
-    // ownOnly: deleting someone else's row reports 404, not 403.
+    // scope/ownOnly: deleting an out-of-scope row reports 404, not 403.
     const ownership = getOwnershipFilter(c)
-    if (ownership && existing['userId'] !== ownership.userId) {
+    if (ownership && existing[ownership.column] !== ownership.value) {
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
 

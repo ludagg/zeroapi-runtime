@@ -73,6 +73,9 @@ async function tryJwt(c: Context, secret: string | undefined): Promise<boolean> 
           sub: payload['sub'],
           email: typeof payload['email'] === 'string' ? payload['email'] : undefined,
           role: typeof payload['role'] === 'string' ? payload['role'] : undefined,
+          // Full verified payload, so scope rules can read arbitrary claims
+          // (e.g. organizationId) for multi-tenant row-level scoping.
+          claims: payload,
         })
       }
       return true
