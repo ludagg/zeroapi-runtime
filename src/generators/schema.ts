@@ -70,7 +70,7 @@ function renderField(name: string, field: FieldDefinition): string {
   return `  ${paddedName}${prismaType}${optional}${unique}${defaultClause}`
 }
 
-const RESERVED_FIELDS = new Set(['id', 'createdAt', 'updatedAt'])
+const RESERVED_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt'])
 
 function resourceHasOwnOnly(spec: ZeroAPISpec, resourceName: string): boolean {
   return (spec.permissions ?? []).some(
@@ -105,6 +105,8 @@ function renderModel(
     `  id            String   @id @default(cuid())`,
     `  createdAt     DateTime @default(now())`,
     `  updatedAt     DateTime @updatedAt`,
+    // Soft-delete tombstone column — rows are marked, never physically removed.
+    ...(resource.softDelete ? [`  deletedAt     DateTime?`] : []),
     ...Object.entries(resource.fields)
       .filter(([name]) => !RESERVED_FIELDS.has(name) && !relationFkFields.has(name))
       .map(([name, field]) => renderField(name, field)),

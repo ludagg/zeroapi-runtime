@@ -37,6 +37,9 @@ export interface ParsedQuery {
   include: string[]
   /** Full-text search term (?q=). Resolved against `resource.searchable` fields. */
   q?: string
+  /** Soft-delete: when true (`?includeDeleted=true`), soft-deleted rows are NOT
+   *  excluded from list/read. Default (false) hides rows with a non-null deletedAt. */
+  includeDeleted?: boolean
   /** Operators present in the URL that the parser does not recognise.
    *  The route layer turns these into a 400 "Unknown operator". */
   unknownOperators: Array<{ field: string; operator: string }>
@@ -56,7 +59,7 @@ const DEFAULT_LIMIT = 20
 const MAX_LIMIT = 100
 
 /** Params consumed by the parser itself (not turned into filters). */
-const RESERVED_PARAMS = new Set(['sort', 'cursor', 'limit', 'include', 'q', 'page'])
+const RESERVED_PARAMS = new Set(['sort', 'cursor', 'limit', 'include', 'q', 'page', 'includeDeleted'])
 
 const ALLOWED_OPERATORS = new Set([
   'contains', 'eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'in', 'notin',
@@ -139,6 +142,7 @@ export function parseQueryParams(
   let limit = defaultLimit
   let include: string[] = []
   let q: string | undefined
+  let includeDeleted = false
 
   for (const [key, value] of params.entries()) {
     if (key === 'sort') {
@@ -164,6 +168,7 @@ export function parseQueryParams(
       continue
     }
     if (key === 'q') { q = value; continue }
+    if (key === 'includeDeleted') { includeDeleted = value === 'true'; continue }
 
     const bracket = BRACKET_RE.exec(key)
     if (bracket) {
@@ -206,6 +211,7 @@ export function parseQueryParams(
 
   const out: ParsedQuery = { filters, sorts, pagination, include, unknownOperators }
   if (q !== undefined) out.q = q
+  if (includeDeleted) out.includeDeleted = true
   return out
 }
 

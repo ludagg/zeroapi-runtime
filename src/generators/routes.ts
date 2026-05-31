@@ -332,6 +332,9 @@ function buildResourceHandlerBundle(
   // from→to + role on update. Works in both Memory and Prisma modes since the
   // current state is read from the resolved store before validating.
   const sm = resource.stateMachine
+  // Soft-delete: when on, DELETE marks a `deletedAt` tombstone instead of
+  // removing the row, and reads hide tombstoned rows by default.
+  const softDeleteOn = resource.softDelete === true
 
   const handleList = async (c: Context, parent?: ParentScope): Promise<Response> => {
     const paginationFeature = spec.features?.pagination
@@ -416,6 +419,8 @@ function buildResourceHandlerBundle(
       if (searchWhere) Object.assign(fullWhere, searchWhere)
       if (parent) fullWhere[parent.field] = parent.value
       if (ownership) fullWhere[ownership.column] = ownership.value
+      // Soft-delete: hide tombstoned rows unless ?includeDeleted=true.
+      if (softDeleteOn && !query.includeDeleted) fullWhere['deletedAt'] = null
 
       // Real SQL COUNT for total — never a length of an in-memory array.
       const total = await resourceStore.count(fullWhere)
@@ -502,6 +507,11 @@ function buildResourceHandlerBundle(
       items = items.filter((item) => item[ownership.column] === ownership.value)
     }
 
+    // Soft-delete: hide tombstoned rows unless ?includeDeleted=true.
+    if (softDeleteOn && !query.includeDeleted) {
+      items = items.filter((item) => item['deletedAt'] == null)
+    }
+
     const { data, count, nextCursor, pagination } = applyQuery(items, query, {
       resource,
       ...(spec.features ? { features: spec.features } : {}),
@@ -553,6 +563,11 @@ function buildResourceHandlerBundle(
 
     const item = await resourceStore.get(id, prismaInclude ? { include: prismaInclude } : undefined)
     if (!item) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+
+    // Soft-delete: a tombstoned row reads as 404 unless ?includeDeleted=true.
+    if (softDeleteOn && !query.includeDeleted && item['deletedAt'] != null) {
+      return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    }
 
     // Nested: hide cross-parent rows behind 404 (FK columns are present even
     // when relations are included).
@@ -706,6 +721,11 @@ function buildResourceHandlerBundle(
     const existing = await resourceStore.get(id)
     if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
+    // Soft-delete: a tombstoned row is treated as gone (404) for updates.
+    if (softDeleteOn && existing['deletedAt'] != null) {
+      return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    }
+
     if (parent && existing[parent.field] !== parent.value) {
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
@@ -792,6 +812,11 @@ function buildResourceHandlerBundle(
     const existing = await resourceStore.get(id)
     if (!existing) return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
 
+    // Soft-delete: an already-tombstoned row reports 404 (idempotent delete).
+    if (softDeleteOn && existing['deletedAt'] != null) {
+      return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
+    }
+
     if (parent && existing[parent.field] !== parent.value) {
       return c.json({ error: `${resource.name} with id "${id}" not found` }, 404)
     }
@@ -823,7 +848,13 @@ function buildResourceHandlerBundle(
       }
     }
 
-    await resourceStore.delete(id)
+    // Soft-delete marks a `deletedAt` tombstone (row kept); otherwise hard delete.
+    if (softDeleteOn) {
+      const now = new Date().toISOString()
+      await resourceStore.update(id, { ...existing, deletedAt: now, updatedAt: now })
+    } else {
+      await resourceStore.delete(id)
+    }
 
     // afterDelete hook — fire-and-forget
     if (resource.hooks?.afterDelete) {
