@@ -4,6 +4,12 @@ export type {
   ClaimEventsOptions, UpdateAfterAttemptInput,
 } from './store.js'
 export { MemoryWebhookStore } from './store.js'
+export { PrismaWebhookStore } from './prisma-store.js'
+export type {
+  PrismaWebhookLikeClient, PrismaWebhookEndpointDelegate, PrismaWebhookEventDelegate,
+  PrismaWebhookEndpointRow, PrismaWebhookEventRow,
+} from './prisma-store.js'
+export { tryAutoLoadPrismaWebhookStore } from './autodetect.js'
 
 export {
   signPayload, verifySignature, generateWebhookSecret,

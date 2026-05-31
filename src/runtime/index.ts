@@ -52,10 +52,11 @@ import {
   LocalStorage, type StorageProvider, type StorageBootLogger,
 } from '../storage/index.js'
 import {
-  MemoryWebhookStore, WebhookWorker, emitWebhook as emitWebhookImpl,
+  MemoryWebhookStore, PrismaWebhookStore, tryAutoLoadPrismaWebhookStore,
+  WebhookWorker, emitWebhook as emitWebhookImpl,
   mountWebhookAdminRoutes, mountWebhookInboundRoutes,
   type WebhookStore, type WebhookWorkerOptions, type InboundSourceConfig,
-  type InboundRoutesOptions,
+  type InboundRoutesOptions, type PrismaWebhookLikeClient,
 } from '../webhooks/index.js'
 import {
   cascadeSystemResourceDelete, cascadeSystemResourceDeletePrisma,
@@ -400,7 +401,14 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   let webhookEmitter: ((eventType: string, payload: unknown) => void) | undefined
 
   if (webhooksEnabled) {
-    const wStore = providedWebhookStore ?? new MemoryWebhookStore()
+    // Durable store when Prisma is active (reuse the already-resolved client so
+    // we never spin up a second PrismaClient); autodetect; else in-memory.
+    const wStore = resolveWebhookStore({
+      ...(providedWebhookStore ? { providedWebhookStore } : {}),
+      ...(resourceStoreProvider.prismaClient?.()
+        ? { prismaClient: resourceStoreProvider.prismaClient() as unknown as PrismaWebhookLikeClient }
+        : {}),
+    })
     const wWorker = new WebhookWorker(wStore, webhookWorkerOptions ?? {})
 
     if (outboundEvents.size > 0) {
@@ -568,6 +576,25 @@ function resolveResourceStore(opts: {
   // catches any resource the client doesn't cover (see PrismaResourceStoreProvider).
   if (client) return new PrismaResourceStoreProvider(client, memory)
   return memory
+}
+
+/**
+ * Pick the webhook store, mirroring the other store resolvers:
+ *   1. explicit `providedWebhookStore`
+ *   2. the already-resolved Prisma client → PrismaWebhookStore (durable, shared)
+ *   3. auto-detected Prisma (DATABASE_URL + @prisma/client) → same
+ *   4. fallback → MemoryWebhookStore
+ *
+ * Unlike the auth stores, webhooks are best-effort, so memory is an acceptable
+ * fallback even in production (no hard refusal).
+ */
+function resolveWebhookStore(opts: {
+  providedWebhookStore?: WebhookStore
+  prismaClient?: PrismaWebhookLikeClient
+}): WebhookStore {
+  if (opts.providedWebhookStore) return opts.providedWebhookStore
+  if (opts.prismaClient) return new PrismaWebhookStore(opts.prismaClient)
+  return tryAutoLoadPrismaWebhookStore() ?? new MemoryWebhookStore()
 }
 
 /**
