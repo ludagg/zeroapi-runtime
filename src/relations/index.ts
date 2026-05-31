@@ -657,6 +657,30 @@ export function validateIncludes(
   return { ok: true }
 }
 
+/**
+ * Default maximum `?include=` nesting depth. Segments per path: `comments` = 1,
+ * `comments.user` = 2. Caps the depth of the Prisma include tree (and is a clear
+ * upper bound in memory mode, which only resolves one level anyway) so a deep
+ * `?include=a.b.c.d.e…` can't generate a runaway nested query.
+ */
+export const DEFAULT_MAX_INCLUDE_DEPTH = 4
+
+/**
+ * Rejects any include path whose nesting depth (number of dotted segments)
+ * exceeds `maxDepth`. Pure + called BEFORE the include tree is built, so an
+ * abusive request is refused with a 400 before any heavy query runs.
+ */
+export function checkIncludeDepth(
+  includePaths: string[],
+  maxDepth: number,
+): { ok: true } | { ok: false; path: string; depth: number } {
+  for (const path of includePaths) {
+    const depth = path.split('.').filter(Boolean).length
+    if (depth > maxDepth) return { ok: false, path, depth }
+  }
+  return { ok: true }
+}
+
 /** True when the named resource has at least one ownOnly permission rule. */
 function resourceHasOwnOnly(spec: ZeroAPISpec, resourceName: string): boolean {
   return (spec.permissions ?? []).some(
