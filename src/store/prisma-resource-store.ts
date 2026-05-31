@@ -7,7 +7,15 @@ import type { ResourceStore, ResourceStoreProvider, ReadOptions, PrismaInclude }
  * the same trick used by `PrismaApiKeyStore`'s `PrismaApiKeyDelegate`.
  */
 export interface PrismaResourceDelegate {
-  findMany(args?: { include?: PrismaInclude; where?: Record<string, unknown> }): Promise<Array<Record<string, unknown>>>
+  findMany(args?: {
+    include?: PrismaInclude
+    where?: Record<string, unknown>
+    orderBy?: Array<Record<string, 'asc' | 'desc'>>
+    skip?: number
+    take?: number
+    cursor?: { id: string }
+  }): Promise<Array<Record<string, unknown>>>
+  count(args?: { where?: Record<string, unknown> }): Promise<number>
   findUnique(args: { where: { id: string }; include?: PrismaInclude }): Promise<Record<string, unknown> | null>
   create(args: { data: Record<string, unknown> }): Promise<Record<string, unknown>>
   update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<Record<string, unknown>>
@@ -75,10 +83,26 @@ export class PrismaResourceStore implements ResourceStore {
   }
 
   async list(opts?: ReadOptions): Promise<Array<Record<string, unknown>>> {
-    const args: { include?: PrismaInclude; where?: Record<string, unknown> } = {}
+    const args: {
+      include?: PrismaInclude
+      where?: Record<string, unknown>
+      orderBy?: Array<Record<string, 'asc' | 'desc'>>
+      skip?: number
+      take?: number
+      cursor?: { id: string }
+    } = {}
     if (opts?.include) args.include = opts.include
     if (opts?.where && Object.keys(opts.where).length > 0) args.where = opts.where
+    if (opts?.orderBy && opts.orderBy.length > 0) args.orderBy = opts.orderBy
+    if (opts?.skip !== undefined) args.skip = opts.skip
+    if (opts?.take !== undefined) args.take = opts.take
+    if (opts?.cursor) args.cursor = opts.cursor
     return this.delegate().findMany(Object.keys(args).length > 0 ? args : undefined)
+  }
+
+  async count(where?: Record<string, unknown>): Promise<number> {
+    const args = where && Object.keys(where).length > 0 ? { where } : undefined
+    return this.delegate().count(args)
   }
 
   async get(id: string, opts?: ReadOptions): Promise<Record<string, unknown> | undefined> {

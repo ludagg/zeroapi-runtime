@@ -16,11 +16,86 @@ import type { DataStore } from '../../src/index.js'
 // survives a "restart".
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Loose comparison helper mirroring Prisma's ordering of scalars.
+function fakeCompare(a: unknown, b: unknown): number {
+  if (typeof a === 'number' && typeof b === 'number') return a - b
+  return String(a).localeCompare(String(b))
+}
+
+// Faithful-enough Prisma `where` matcher: supports the operators toPrismaQuery
+// emits (equals/not/gt/gte/lt/lte/in/notIn/contains/startsWith/endsWith), a
+// top-level OR (full-text search), and bare scalar equality (ownership/parent).
+function fakeMatchesWhere(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
+  for (const [key, cond] of Object.entries(where)) {
+    if (key === 'OR') {
+      const arr = cond as Array<Record<string, unknown>>
+      if (!arr.some((sub) => fakeMatchesWhere(row, sub))) return false
+      continue
+    }
+    const val = row[key]
+    if (cond !== null && typeof cond === 'object' && !Array.isArray(cond)) {
+      const c = cond as Record<string, unknown>
+      if ('equals' in c && val !== c['equals']) return false
+      if ('not' in c && val === c['not']) return false
+      if ('in' in c && !(c['in'] as unknown[]).includes(val)) return false
+      if ('notIn' in c && (c['notIn'] as unknown[]).includes(val)) return false
+      if ('contains' in c) {
+        const insensitive = c['mode'] === 'insensitive'
+        const hay = insensitive ? String(val).toLowerCase() : String(val)
+        const needle = insensitive ? String(c['contains']).toLowerCase() : String(c['contains'])
+        if (!hay.includes(needle)) return false
+      }
+      if ('startsWith' in c && !String(val).startsWith(String(c['startsWith']))) return false
+      if ('endsWith' in c && !String(val).endsWith(String(c['endsWith']))) return false
+      if ('gt' in c && !(fakeCompare(val, c['gt']) > 0)) return false
+      if ('gte' in c && !(fakeCompare(val, c['gte']) >= 0)) return false
+      if ('lt' in c && !(fakeCompare(val, c['lt']) < 0)) return false
+      if ('lte' in c && !(fakeCompare(val, c['lte']) <= 0)) return false
+    } else if (val !== cond) {
+      return false
+    }
+  }
+  return true
+}
+
+interface FakeFindManyArgs {
+  where?: Record<string, unknown>
+  orderBy?: Array<Record<string, 'asc' | 'desc'>>
+  skip?: number
+  take?: number
+  cursor?: { id: string }
+}
+
 class FakeDelegate {
   readonly rows = new Map<string, Record<string, unknown>>()
 
-  async findMany(): Promise<Array<Record<string, unknown>>> {
-    return Array.from(this.rows.values())
+  async findMany(args?: FakeFindManyArgs): Promise<Array<Record<string, unknown>>> {
+    let rows = Array.from(this.rows.values())
+    if (args?.where) rows = rows.filter((r) => fakeMatchesWhere(r, args.where!))
+    if (args?.orderBy && args.orderBy.length > 0) {
+      rows = [...rows].sort((a, b) => {
+        for (const o of args.orderBy!) {
+          const entry = Object.entries(o)[0]
+          if (!entry) continue
+          const [field, dir] = entry
+          const d = fakeCompare(a[field], b[field])
+          if (d !== 0) return dir === 'asc' ? d : -d
+        }
+        return 0
+      })
+    }
+    if (args?.cursor) {
+      const idx = rows.findIndex((r) => r['id'] === args.cursor!.id)
+      if (idx >= 0) rows = rows.slice(idx) // cursor row included; skip:1 drops it
+    }
+    if (args?.skip) rows = rows.slice(args.skip)
+    if (args?.take !== undefined) rows = rows.slice(0, args.take)
+    return rows
+  }
+  async count(args?: { where?: Record<string, unknown> }): Promise<number> {
+    let rows = Array.from(this.rows.values())
+    if (args?.where) rows = rows.filter((r) => fakeMatchesWhere(r, args.where!))
+    return rows.length
   }
   async findUnique(args: { where: { id: string } }): Promise<Record<string, unknown> | null> {
     return this.rows.get(args.where.id) ?? null

@@ -5,7 +5,7 @@ import type {
   ZeroAPISpec, ResourceDefinition, CrudAction, CustomEndpointDef, PermissionAction, TxOperation,
 } from '../types/spec.js'
 import type { DataStore, ResourceMap } from '../types/store.js'
-import type { ResourceStore, ResourceStoreProvider } from '../store/resource-store.js'
+import type { ResourceStore, ResourceStoreProvider, ReadOptions } from '../store/resource-store.js'
 import { MemoryResourceStoreProvider } from '../store/resource-store.js'
 import type { HandlerFn } from '../hooks/types.js'
 import { generateZodSchemas, type ResourceSchemas } from './validation.js'
@@ -16,8 +16,8 @@ import {
   getRequesterIdentity,
   resourceHasOwnOnly,
 } from '../rbac/resource-permissions.js'
-import { parseQueryParams } from '../query/builder.js'
-import { applyQuery } from '../query/apply.js'
+import { parseQueryParams, toPrismaQuery } from '../query/builder.js'
+import { applyQuery, type PaginationMeta } from '../query/apply.js'
 import {
   applyIncludes, extractNestedRelations, persistNestedRelations, validateIncludes,
   type SystemResourceResolvers,
@@ -186,6 +186,93 @@ function buildAllowedFilterFields(resource: ResourceDefinition): Set<string> {
   return allowed
 }
 
+// ── Prisma query pushdown (P0-1) ────────────────────────────────────────────
+// These helpers translate the parsed query into SQL clauses so the database —
+// not Node — does the filtering/searching/sorting/pagination. Memory mode never
+// calls them (it keeps `applyQuery`).
+
+const NUMERIC_FILTER_TYPES = new Set(['number', 'integer', 'decimal'])
+
+/**
+ * Coerce a raw filter value to the JS type Prisma expects for `fieldType`.
+ * Numeric columns → number; boolean → boolean; everything else (string/text/
+ * email/url/uuid/enum/json, dates as ISO strings, and FK/id columns whose type
+ * is unknown) → string. This prevents Prisma type errors when the URL parser
+ * guessed the wrong primitive — e.g. `?sku=12345` on a String column would
+ * otherwise reach Prisma as the number 12345 and throw.
+ */
+function coerceScalarForField(fieldType: string | undefined, raw: unknown): unknown {
+  if (raw === null || raw === undefined) return raw
+  if (fieldType && NUMERIC_FILTER_TYPES.has(fieldType)) {
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : raw
+  }
+  if (fieldType === 'boolean') {
+    if (typeof raw === 'boolean') return raw
+    if (raw === 'true') return true
+    if (raw === 'false') return false
+    return raw
+  }
+  return typeof raw === 'string' ? raw : String(raw)
+}
+
+/**
+ * In-place type coercion of a Prisma `where` produced by `toPrismaQuery`, using
+ * the resource's declared field types. Only equality/comparison/set operators
+ * are touched; `contains`/`startsWith`/`endsWith` stay strings (they are only
+ * valid on string columns anyway).
+ */
+function coercePrismaWhereTypes(where: Record<string, unknown>, resource: ResourceDefinition): void {
+  for (const [field, condRaw] of Object.entries(where)) {
+    if (!condRaw || typeof condRaw !== 'object') continue
+    const fieldType = resource.fields[field]?.type
+    const cond = condRaw as Record<string, unknown>
+    for (const op of ['equals', 'not', 'gt', 'gte', 'lt', 'lte']) {
+      if (cond[op] !== undefined) cond[op] = coerceScalarForField(fieldType, cond[op])
+    }
+    for (const op of ['in', 'notIn']) {
+      const arr = cond[op]
+      if (Array.isArray(arr)) cond[op] = arr.map((v) => coerceScalarForField(fieldType, v))
+    }
+  }
+}
+
+/**
+ * Build a Prisma `{ OR: [...] }` full-text search clause over the resource's
+ * `searchable` fields. Case-insensitive `contains` to mirror the in-memory
+ * search semantics. Returns undefined when search is disabled / not applicable.
+ */
+function buildPrismaSearchWhere(
+  q: string | undefined,
+  resource: ResourceDefinition,
+  features?: ZeroAPISpec['features'],
+): Record<string, unknown> | undefined {
+  if (!q || q.length === 0) return undefined
+  if (features?.search?.enabled !== true) return undefined
+  const searchable = resource.searchable ?? []
+  if (searchable.length === 0) return undefined
+  return { OR: searchable.map((f) => ({ [f]: { contains: q, mode: 'insensitive' } })) }
+}
+
+/**
+ * Best-effort 1-indexed page for cursor mode. Exact for the default `id:asc`
+ * ordering (counts rows preceding the cursor with one indexed COUNT); falls
+ * back to 1 when a custom sort makes "preceding" ill-defined by id alone, or
+ * when `id` is already constrained by a filter. Cursor-mode page is, by design,
+ * an approximation — clients paginate via `nextCursor`, not the page number.
+ */
+async function computeCursorPage(
+  store: ResourceStore,
+  fullWhere: Record<string, unknown>,
+  sorts: Array<{ field: string }>,
+  cursorId: string,
+  limit: number,
+): Promise<number> {
+  if (limit <= 0 || sorts.length > 0 || 'id' in fullWhere) return 1
+  const preceding = await store.count({ ...fullWhere, id: { lt: cursorId } })
+  return Math.floor(preceding / limit) + 1
+}
+
 interface ResourceHandlerBundle {
   guards: {
     list:   MiddlewareHandler | null
@@ -305,6 +392,97 @@ function buildResourceHandlerBundle(
 
     const ownership = getOwnershipFilter(c)
 
+    // ── Prisma mode: SQL pushdown (P0-1) ─────────────────────────────────────
+    // Filtering, full-text search, sorting and pagination become a single SQL
+    // query (WHERE / ORDER BY / LIMIT / OFFSET) plus a SQL COUNT — the database
+    // no longer ships the whole table to Node. Row-level scope (ownOnly /
+    // multi-tenant) and the parent FK (nested routes) are folded into the same
+    // WHERE so they stay authoritative and out-of-scope rows never leave the DB.
+    if (prismaClient) {
+      // Re-coerce filter values to the declared field type (e.g. ?sku=12345 on a
+      // String column must reach Prisma as a string, not a number).
+      const tq = toPrismaQuery(query)
+      coercePrismaWhereTypes(tq.where, resource)
+
+      // Deterministic order: keep the requested sorts, then an id:asc tiebreak so
+      // cursor pagination is stable across requests (mirrors applySorts).
+      const orderBy = (tq.orderBy as Array<Record<string, 'asc' | 'desc'>>).slice()
+      if (!orderBy.some((o) => 'id' in o)) orderBy.push({ id: 'asc' })
+
+      // Combine: scalar filters + M2M + search + parent FK + scope. Scope is
+      // applied LAST so a client-supplied filter can never widen it.
+      const fullWhere: Record<string, unknown> = { ...(prismaWhere ?? {}), ...tq.where }
+      const searchWhere = buildPrismaSearchWhere(query.q, resource, spec.features)
+      if (searchWhere) Object.assign(fullWhere, searchWhere)
+      if (parent) fullWhere[parent.field] = parent.value
+      if (ownership) fullWhere[ownership.column] = ownership.value
+
+      // Real SQL COUNT for total — never a length of an in-memory array.
+      const total = await resourceStore.count(fullWhere)
+      const limit = query.pagination.limit
+
+      const listOpts: ReadOptions = { where: fullWhere, orderBy }
+      if (prismaInclude) listOpts.include = prismaInclude
+
+      let pageItems: Array<Record<string, unknown>>
+      let nextCursor: string | null = null
+      let page: number
+
+      if (query.pagination.cursor !== undefined && tq.cursor) {
+        // Keyset: anchor on the cursor id, skip it, over-fetch one row so we know
+        // whether another page exists without a second query.
+        listOpts.cursor = tq.cursor
+        listOpts.skip = 1
+        listOpts.take = limit + 1
+        const fetched = await resourceStore.list(listOpts)
+        const hasMore = fetched.length > limit
+        pageItems = hasMore ? fetched.slice(0, limit) : fetched
+        const last = pageItems[pageItems.length - 1]
+        nextCursor = hasMore && last ? String(last['id']) : null
+        page = await computeCursorPage(resourceStore, fullWhere, query.sorts, tq.cursor.id, limit)
+      } else if (query.pagination.page !== undefined) {
+        // Offset pagination — exact page metadata via LIMIT/OFFSET.
+        page = Math.max(1, query.pagination.page)
+        listOpts.skip = (page - 1) * limit
+        listOpts.take = limit
+        pageItems = await resourceStore.list(listOpts)
+      } else {
+        // First page (legacy default) with a cursor-style nextCursor.
+        listOpts.skip = 0
+        listOpts.take = limit + 1
+        const fetched = await resourceStore.list(listOpts)
+        const hasMore = fetched.length > limit
+        pageItems = hasMore ? fetched.slice(0, limit) : fetched
+        const last = pageItems[pageItems.length - 1]
+        nextCursor = hasMore && last ? String(last['id']) : null
+        page = 1
+      }
+
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 0
+      const pagination: PaginationMeta = {
+        page, limit, total, totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+      }
+
+      // Relations are already nested by Prisma's native include; only the opt-in
+      // aggregates remain (batched: one query per relation, never per row).
+      if (aggregateIncludes.length > 0) {
+        await applyAggregates(pageItems, resolveAggregates(resource, spec, aggregateIncludes), {
+          store,
+          prismaClient: prismaClient as unknown as PrismaAggregateClient,
+        })
+      }
+
+      return c.json({
+        data: pageItems,
+        count: total,
+        pagination,
+        ...(nextCursor ? { nextCursor } : {}),
+      })
+    }
+
+    // ── Memory mode: fetch all, then filter/sort/paginate in memory (unchanged) ─
     const listOpts: { include?: PrismaInclude; where?: Record<string, unknown> } = {}
     if (prismaInclude) listOpts.include = prismaInclude
     // Row-level scope (ownOnly / multi-tenant) + M2M filters → pushed to Prisma's
