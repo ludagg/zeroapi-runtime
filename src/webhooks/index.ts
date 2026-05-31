@@ -10,6 +10,10 @@ export type {
   PrismaWebhookEndpointRow, PrismaWebhookEventRow,
 } from './prisma-store.js'
 export { tryAutoLoadPrismaWebhookStore } from './autodetect.js'
+export {
+  createWebhookSecretCipher, isEncryptedSecret, WEBHOOK_SECRET_ENCRYPTION_KEY_ENV,
+} from './secret-cipher.js'
+export type { WebhookSecretCipher } from './secret-cipher.js'
 
 export {
   signPayload, verifySignature, generateWebhookSecret,

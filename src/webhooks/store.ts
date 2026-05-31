@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import type { WebhookSecretCipher } from './secret-cipher.js'
 
 /**
  * Persisted endpoint subscription. The secret is stored in the clear so it can
@@ -110,27 +111,40 @@ export class MemoryWebhookStore implements WebhookStore {
   private readonly endpoints = new Map<string, WebhookEndpointRecord>()
   private readonly events = new Map<string, WebhookEventRecord>()
 
+  /** Optional cipher: when present the `secret` is stored encrypted at rest and
+   *  decrypted on read. When absent, secrets are stored in clear (the default). */
+  constructor(private readonly cipher?: WebhookSecretCipher) {}
+
+  /** Decrypt the stored secret on the way out (no-op without a cipher). */
+  private reveal(record: WebhookEndpointRecord): WebhookEndpointRecord {
+    if (!this.cipher) return record
+    return { ...record, secret: this.cipher.decrypt(record.secret) }
+  }
+
   async createEndpoint(input: CreateWebhookEndpointInput): Promise<WebhookEndpointRecord> {
     const record: WebhookEndpointRecord = {
       id: randomUUID(),
       url: input.url,
       events: input.events.join(','),
-      secret: input.secret,
+      // Encrypt at rest when a cipher is configured.
+      secret: this.cipher ? this.cipher.encrypt(input.secret) : input.secret,
       active: true,
       createdAt: new Date(),
     }
     this.endpoints.set(record.id, record)
-    return record
+    // Return the PLAINTEXT secret (shown once at creation), never the ciphertext.
+    return { ...record, secret: input.secret }
   }
 
   async listEndpoints(): Promise<WebhookEndpointRecord[]> {
-    return [...this.endpoints.values()].sort(
-      (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
-    )
+    return [...this.endpoints.values()]
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((r) => this.reveal(r))
   }
 
   async getEndpoint(id: string): Promise<WebhookEndpointRecord | null> {
-    return this.endpoints.get(id) ?? null
+    const r = this.endpoints.get(id)
+    return r ? this.reveal(r) : null
   }
 
   async deleteEndpoint(id: string): Promise<boolean> {
@@ -142,7 +156,7 @@ export class MemoryWebhookStore implements WebhookStore {
     for (const ep of this.endpoints.values()) {
       if (!ep.active) continue
       const events = parseEventsCsv(ep.events)
-      if (events.includes(eventType) || events.includes('*')) out.push(ep)
+      if (events.includes(eventType) || events.includes('*')) out.push(this.reveal(ep))
     }
     return out
   }

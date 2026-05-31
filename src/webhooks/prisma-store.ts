@@ -8,6 +8,7 @@ import type {
   ClaimEventsOptions,
   UpdateAfterAttemptInput,
 } from './store.js'
+import type { WebhookSecretCipher } from './secret-cipher.js'
 
 const DEFAULT_LOCK_TTL_MS = 2 * 60 * 1000
 
@@ -108,25 +109,42 @@ function toEventRecord(r: PrismaWebhookEventRow): WebhookEventRecord {
  * win each row, so concurrent workers never deliver the same event twice.
  */
 export class PrismaWebhookStore implements WebhookStore {
-  constructor(private readonly client: PrismaWebhookLikeClient) {}
+  /** Optional cipher: secret encrypted at rest in the DB, decrypted on read. */
+  constructor(
+    private readonly client: PrismaWebhookLikeClient,
+    private readonly cipher?: WebhookSecretCipher,
+  ) {}
+
+  /** Decrypt the stored secret on the way out (no-op without a cipher). */
+  private reveal(record: WebhookEndpointRecord): WebhookEndpointRecord {
+    if (!this.cipher) return record
+    return { ...record, secret: this.cipher.decrypt(record.secret) }
+  }
 
   // ── Endpoints ──────────────────────────────────────────────────────────────
 
   async createEndpoint(input: CreateWebhookEndpointInput): Promise<WebhookEndpointRecord> {
     const row = await this.client.webhookEndpoint.create({
-      data: { url: input.url, events: input.events.join(','), secret: input.secret, active: true },
+      data: {
+        url: input.url,
+        events: input.events.join(','),
+        // Encrypt at rest when a cipher is configured.
+        secret: this.cipher ? this.cipher.encrypt(input.secret) : input.secret,
+        active: true,
+      },
     })
-    return toEndpointRecord(row)
+    // Return the PLAINTEXT secret (shown once at creation), never the ciphertext.
+    return { ...toEndpointRecord(row), secret: input.secret }
   }
 
   async listEndpoints(): Promise<WebhookEndpointRecord[]> {
     const rows = await this.client.webhookEndpoint.findMany({ orderBy: { createdAt: 'desc' } })
-    return rows.map(toEndpointRecord)
+    return rows.map((r) => this.reveal(toEndpointRecord(r)))
   }
 
   async getEndpoint(id: string): Promise<WebhookEndpointRecord | null> {
     const row = await this.client.webhookEndpoint.findUnique({ where: { id } })
-    return row ? toEndpointRecord(row) : null
+    return row ? this.reveal(toEndpointRecord(row)) : null
   }
 
   async deleteEndpoint(id: string): Promise<boolean> {
@@ -147,7 +165,7 @@ export class PrismaWebhookStore implements WebhookStore {
         const events = parseEventsCsv(r.events)
         return events.includes(eventType) || events.includes('*')
       })
-      .map(toEndpointRecord)
+      .map((r) => this.reveal(toEndpointRecord(r)))
   }
 
   // ── Events ───────────────────────────────────────────────────────────────────
