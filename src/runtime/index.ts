@@ -87,6 +87,13 @@ export interface RuntimeOptions {
   /** Chantier 4: Validate required env vars at startup; throws with a clear error on failure. */
   validateEnv?: boolean
   /**
+   * Graceful shutdown: when true, the runtime binds `SIGTERM`/`SIGINT` to call
+   * `shutdown()` once (stop the webhook worker, disconnect Prisma). Default
+   * `false` — a library must not hijack process signals; the app should call
+   * `result.shutdown()` itself unless it opts in here.
+   */
+  handleSignals?: boolean
+  /**
    * Phase 1.1: explicit API-key store. Takes precedence over `prisma`/auto-detect.
    * Defaults to `PrismaApiKeyStore` when a Prisma client is detected, otherwise
    * `MemoryApiKeyStore` in dev/test. In production (`NODE_ENV=production`) the
@@ -195,6 +202,13 @@ export interface RuntimeResult {
    * Only available when the matching auth feature is active (e.g. auth.jwt).
    */
   deleteSystemResource?: (resource: string, id: string) => Promise<CascadeResult>
+  /**
+   * Graceful shutdown. Stops the webhook worker (no new delivery ticks; an
+   * in-flight tick is left to finish, never cut) and disconnects every known
+   * Prisma client. A no-op in pure memory mode. Idempotent. Call this on
+   * SIGTERM/SIGINT (or pass `handleSignals: true` to have the runtime do it).
+   */
+  shutdown: () => Promise<void>
 }
 
 /**
@@ -233,6 +247,7 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     refreshTokenStore: providedRefreshTokenStore,
     revocationStore: providedRevocationStore,
     authRateLimit,
+    handleSignals = false,
     prismaJwt,
     jwtSecretLogger,
     oauthAccountStore: providedOAuthAccountStore,
@@ -293,10 +308,25 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     })
   )
 
-  // Chantier 2: Ready endpoint — signals the instance is ready to serve traffic
-  app.get('/ready', (c) =>
-    c.json({ status: 'ready', timestamp: new Date().toISOString() })
-  )
+  // Chantier 2: Ready endpoint — real readiness. In Prisma mode it runs a light
+  // `SELECT 1` so an orchestrator never routes traffic to an instance whose DB
+  // is unreachable (503). In memory mode there is no DB to check → ready.
+  app.get('/ready', async (c) => {
+    const client = resourceStoreProvider.prismaClient?.() as
+      | { $queryRawUnsafe?: (query: string) => Promise<unknown> }
+      | undefined
+    const timestamp = new Date().toISOString()
+    if (!client || typeof client.$queryRawUnsafe !== 'function') {
+      // No database to probe (memory mode / partial client) — liveness == readiness.
+      return c.json({ status: 'ready', database: 'skipped', timestamp }, 200)
+    }
+    try {
+      await client.$queryRawUnsafe('SELECT 1')
+      return c.json({ status: 'ready', database: 'ok', timestamp }, 200)
+    } catch {
+      return c.json({ status: 'not_ready', database: 'unreachable', timestamp }, 503)
+    }
+  })
 
   // Phase 1.1: real API-key verification — pick a store and bootstrap an initial key
   const apiKeyAuthEnabled =
@@ -509,6 +539,36 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
       }
     : undefined
 
+  // ── Graceful shutdown ────────────────────────────────────────────────────
+  // Stop the webhook worker (no new ticks; an in-flight tick finishes on its
+  // own) and disconnect every distinct Prisma client we know about. Idempotent.
+  let didShutdown = false
+  const shutdown = async (): Promise<void> => {
+    if (didShutdown) return
+    didShutdown = true
+
+    if (webhooks) webhooks.worker.stop()
+
+    const clients = new Set<unknown>([
+      resourceStoreProvider.prismaClient?.(),
+      prisma,
+      prismaJwt,
+    ])
+    for (const client of clients) {
+      const disconnect = (client as { $disconnect?: () => Promise<void> } | undefined)?.$disconnect
+      if (typeof disconnect === 'function') {
+        try { await disconnect.call(client) } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // Opt-in only: a library must not hijack signals by default.
+  if (handleSignals) {
+    const onSignal = () => { void shutdown() }
+    process.once('SIGTERM', onSignal)
+    process.once('SIGINT', onSignal)
+  }
+
   return {
     app,
     prismaSchema: generatePrismaSchema(spec),
@@ -517,6 +577,7 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     openApiSpec,
     spec,
     ready,
+    shutdown,
     ...(webhooks ? { webhooks } : {}),
     ...(deleteSystemResource ? { deleteSystemResource } : {}),
   }
