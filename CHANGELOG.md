@@ -5,6 +5,34 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1] - 2026-05-31
+
+Patch: audit quick wins.
+
+### Fixed
+
+- **Soft-delete now actually works.** `softDelete` was declared in the spec but
+  unimplemented. For a `softDelete` resource the generated schema now emits a
+  `deletedAt DateTime?` tombstone column, `DELETE` marks `deletedAt` instead of
+  removing the row, and `list` / `read` (plus `update` / `delete`) hide
+  tombstoned rows by default — pushed to SQL (`WHERE deletedAt IS NULL`) in
+  Prisma mode and filtered in memory mode. The new `?includeDeleted=true` query
+  param opts back in. Proven on real PostgreSQL **and** memory: a soft-deleted
+  row disappears from `list`/`read`, `404`s on read/update, reappears with
+  `?includeDeleted=true`, and physically survives in the database with
+  `deletedAt` set.
+- **Transaction `failedOperation` reports the real operation.** The in-memory
+  transaction executor used to stringify an object to `"[object Object]"` on
+  failure; it now tracks the operation currently running and reports it
+  (e.g. `"decrement Product"`), matching the Prisma executor.
+
+### CI
+
+- **Pull requests are now validated.** A new `ci.yml` workflow runs `typecheck`
+  + the full test suite on every PR (and non-`main` push) without publishing, so
+  changes are checked before merge. The publish workflow stays dedicated to
+  `main`.
+
 ## [0.21.0] - 2026-05-31
 
 Production-scale **Prisma mode** + **auth security** release. Three runtime gaps
