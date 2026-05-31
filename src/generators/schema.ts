@@ -333,7 +333,20 @@ function renderJwtUserModels(
     renderBackRelationLines(refreshTokenBackRelations),
   )
 
-  return [userModel, refreshTokenModel]
+  // P1: access-token revocation (jti blacklist + per-user cutoff). One row per
+  // revocation; pruned once `expiresAt` passes.
+  const revokedTokenModel = `model RevokedToken {
+  id        String    @id @default(uuid())
+  jti       String?   @unique
+  userId    String?
+  notBefore DateTime?
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}`
+
+  return [userModel, refreshTokenModel, revokedTokenModel]
 }
 
 function renderOAuthAccountModel(backRelations: UserBackRelation[] = []): string {

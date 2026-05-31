@@ -1,17 +1,24 @@
 import { describe, it, expect } from 'vitest'
+import { createHmac } from 'node:crypto'
 import { createRuntime } from '../../src/index.js'
 import type { ZeroAPISpec } from '../../src/types/spec.js'
 
+// P1: the runtime now refuses unverified tokens — a jwt/bearer strategy MUST
+// have a secret and the token MUST be signed. We sign a real HS256 token here
+// (the role is still read from the payload by the RBAC layer).
+const RBAC_SECRET = 'rbac-test-secret-0123456789'
 function makeRbacToken(role: string): string {
-  const header  = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')
+  const header  = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')
   const payload = Buffer.from(JSON.stringify({ sub: '1', role })).toString('base64url')
-  return `${header}.${payload}.`
+  const data = `${header}.${payload}`
+  const sig = createHmac('sha256', RBAC_SECRET).update(data).digest('base64url')
+  return `${data}.${sig}`
 }
 
 const rbacSpec: ZeroAPISpec = {
   version: '1.0.0',
   name: 'rbac-test-api',
-  auth: { strategy: 'bearer' },
+  auth: { strategy: 'bearer', secret: RBAC_SECRET },
   roles: [
     { name: 'admin', inherits: ['editor'] },
     { name: 'editor', inherits: ['viewer'] },
