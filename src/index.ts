@@ -127,6 +127,7 @@ export {
   SYSTEM_RESOURCES, SYSTEM_RESOURCE_SAFE_FIELDS,
   isSystemResourceName, isSystemResourceActive, projectSystemResource,
   cascadeSystemResourceDelete, cascadeSystemResourceDeletePrisma,
+  checkIncludeDepth, DEFAULT_MAX_INCLUDE_DEPTH,
 } from './relations/index.js'
 export type {
   IncludeValidationResult, IncludeOwnershipContext,

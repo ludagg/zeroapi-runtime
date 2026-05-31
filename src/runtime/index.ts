@@ -59,6 +59,7 @@ import {
 } from '../webhooks/index.js'
 import {
   cascadeSystemResourceDelete, cascadeSystemResourceDeletePrisma,
+  DEFAULT_MAX_INCLUDE_DEPTH,
   type SystemResourceResolvers, type CascadeResult,
 } from '../relations/index.js'
 import {
@@ -84,6 +85,12 @@ export interface RuntimeOptions {
   logLevel?: LogLevel
   /** Chantier 3: External rate limit store (e.g. RedisRateLimitStore). Defaults to in-memory. */
   rateLimitStore?: RateLimitStore
+  /**
+   * Maximum `?include=` nesting depth (dotted segments per path). Beyond it the
+   * route answers 400 BEFORE building/executing the query, so a deep
+   * `?include=a.b.c.d.e…` can't generate a runaway nested SQL query. Default 4.
+   */
+  maxIncludeDepth?: number
   /** Chantier 4: Validate required env vars at startup; throws with a clear error on failure. */
   validateEnv?: boolean
   /**
@@ -225,6 +232,7 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     uploadDir      = './uploads',
     handlers       = {},
     rateLimitStore,
+    maxIncludeDepth,
     validateEnv: doValidateEnv = false,
     apiKeyStore: providedApiKeyStore,
     prisma,
@@ -441,7 +449,7 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   }
 
   // Chantier 1: Routes with hooks + custom endpoints
-  generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers, webhookEmitter, systemResolvers, resourceStoreProvider)
+  generateRoutes(spec, app, store, authMiddleware, uploadDir, handlers, webhookEmitter, systemResolvers, resourceStoreProvider, maxIncludeDepth ?? DEFAULT_MAX_INCLUDE_DEPTH)
 
   // Chantier 5: Legacy auth flows — only when the new JWT user system is off,
   // since both register the same /auth/* paths.

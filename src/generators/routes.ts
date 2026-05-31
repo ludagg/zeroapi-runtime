@@ -20,7 +20,8 @@ import { parseQueryParams, toPrismaQuery } from '../query/builder.js'
 import { applyQuery, type PaginationMeta } from '../query/apply.js'
 import {
   applyIncludes, extractNestedRelations, persistNestedRelations, persistNestedRelationsPrisma,
-  validateIncludes, type SystemResourceResolvers,
+  validateIncludes, checkIncludeDepth, DEFAULT_MAX_INCLUDE_DEPTH,
+  type SystemResourceResolvers,
 } from '../relations/index.js'
 import { buildPrismaInclude, extractM2MFilters } from '../relations/prisma-include.js'
 import type { PrismaInclude } from '../store/resource-store.js'
@@ -299,6 +300,7 @@ function buildResourceHandlerBundle(
   handlers: Record<string, HandlerFn> = {},
   emitWebhook?: EmitWebhookFn,
   systemResolvers?: SystemResourceResolvers,
+  maxIncludeDepth: number = DEFAULT_MAX_INCLUDE_DEPTH,
 ): ResourceHandlerBundle {
   const key = resource.name.toLowerCase()
   const lowerName = key
@@ -383,6 +385,12 @@ function buildResourceHandlerBundle(
     // include tree (nested); in memory mode we keep the 1-level validator.
     let prismaInclude: PrismaInclude | undefined
     if (relationIncludes.length > 0) {
+      // Depth guard FIRST — reject abusive nesting before any tree is built or
+      // query runs. Applies in both modes (memory only resolves 1 level anyway).
+      const depth = checkIncludeDepth(relationIncludes, maxIncludeDepth)
+      if (!depth.ok) {
+        return c.json({ error: `Include depth exceeds maximum of ${maxIncludeDepth} (path: "${depth.path}")` }, 400)
+      }
       if (prismaClient) {
         const built = buildPrismaInclude(resource, spec, relationIncludes, getRequesterIdentity(c).userId)
         if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
@@ -551,6 +559,12 @@ function buildResourceHandlerBundle(
     const { relationIncludes, aggregateIncludes } = partitionIncludes(resource, query.include)
     let prismaInclude: PrismaInclude | undefined
     if (relationIncludes.length > 0) {
+      // Depth guard FIRST — reject abusive nesting before any tree is built or
+      // query runs. Applies in both modes (memory only resolves 1 level anyway).
+      const depth = checkIncludeDepth(relationIncludes, maxIncludeDepth)
+      if (!depth.ok) {
+        return c.json({ error: `Include depth exceeds maximum of ${maxIncludeDepth} (path: "${depth.path}")` }, 400)
+      }
       if (prismaClient) {
         const built = buildPrismaInclude(resource, spec, relationIncludes, getRequesterIdentity(c).userId)
         if (!built.ok) return c.json({ error: `Unknown relation: ${built.unknown}` }, 400)
@@ -928,10 +942,11 @@ function registerResource(
   handlers: Record<string, HandlerFn> = {},
   emitWebhook?: EmitWebhookFn,
   systemResolvers?: SystemResourceResolvers,
+  maxIncludeDepth: number = DEFAULT_MAX_INCLUDE_DEPTH,
 ): { router: Hono; bundle: ResourceHandlerBundle } {
   const endpoints: CrudAction[] = resource.endpoints ?? DEFAULT_ENDPOINTS
   const bundle = buildResourceHandlerBundle(
-    resource, store, provider, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers,
+    resource, store, provider, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers, maxIncludeDepth,
   )
   const router = new Hono()
 
@@ -1060,6 +1075,7 @@ export function generateRoutes(
   emitWebhook?: EmitWebhookFn,
   systemResolvers?: SystemResourceResolvers,
   resourceStore?: ResourceStoreProvider,
+  maxIncludeDepth: number = DEFAULT_MAX_INCLUDE_DEPTH,
 ): void {
   // Resolve the persistence backend. When no provider is supplied (e.g. direct
   // callers / older call sites) we default to an in-memory provider over the
@@ -1072,7 +1088,7 @@ export function generateRoutes(
   for (const resource of spec.resources) {
     built.set(
       resource.name,
-      registerResource(resource, store, provider, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers),
+      registerResource(resource, store, provider, spec, authMiddleware, uploadDir, handlers, emitWebhook, systemResolvers, maxIncludeDepth),
     )
   }
 
