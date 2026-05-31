@@ -5,6 +5,42 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-05-31
+
+Production-hardening release: durable webhooks, include-depth guard, and real
+readiness + graceful shutdown. All proven against real PostgreSQL.
+
+### Added
+
+- **Durable `PrismaWebhookStore`** — webhook endpoints and the delivery queue
+  now persist to the database and survive restarts / work across instances,
+  auto-wired when Prisma is active (reusing the already-resolved client), with a
+  `MemoryWebhookStore` fallback. `claimReadyEvents` is multi-instance safe: an
+  atomic `updateMany` lock guard is the single source of truth, so concurrent
+  workers never double-deliver an event.
+- **`?include=` depth guard** — nested include paths are capped (default 4,
+  configurable via `RuntimeOptions.maxIncludeDepth`). Beyond the limit the route
+  answers `400 "Include depth exceeds maximum of N (path: …)"` BEFORE building or
+  executing the query, so a deep `?include=a.b.c.d.e…` can't generate a runaway
+  nested SQL query. Memory mode (one level) is unchanged.
+- **Real `/ready` database probe** — in Prisma mode `/ready` runs a light
+  `SELECT 1` and returns `503` when the database is unreachable (so an
+  orchestrator stops routing traffic to a broken instance); memory mode stays
+  `200`. `/health` is unchanged (liveness/uptime).
+- **Graceful shutdown** — `RuntimeResult.shutdown()` stops the webhook worker
+  (no new ticks; an in-flight tick is left to finish, never cut) and disconnects
+  every known Prisma client; idempotent, a no-op in memory. Opt into binding
+  `SIGTERM`/`SIGINT` with `RuntimeOptions.handleSignals` (default `false` — a
+  library must not hijack process signals).
+
+### Verified
+
+- Proven on real PostgreSQL: webhook endpoint + queued event survive a restart
+  and delivery resumes (no double-delivery under two concurrent workers); deep
+  includes are rejected with zero SQL executed; `/ready` flips 200→503→200 as the
+  database stops and restarts; `shutdown()` stops the worker and disconnects.
+  All 1066 unit tests stay green; `tsc` clean.
+
 ## [0.21.1] - 2026-05-31
 
 Patch: audit quick wins.
