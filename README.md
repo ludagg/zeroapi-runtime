@@ -78,6 +78,8 @@ Building a production REST API means writing the same plumbing over and over: ro
 
 - **Declarative** — one Spec describes the whole API surface.
 - **Batteries included** — auth, RBAC, webhooks, uploads, docs, deploy configs all ship in the box.
+- **Scales in Prisma mode** — filtering, full-text search, sorting and pagination are pushed down to a single SQL query (`WHERE`/`ORDER BY`/`LIMIT`/`OFFSET` + a real `COUNT`); the database never ships the whole table to Node. Nested routes, many-to-many writes, and `onDelete` cascades all run in the DB (the cascade atomically, in one `$transaction`).
+- **Secure by default** — JWT verification fails closed (a token is refused when there is no secret to verify it), access tokens are revocable (logout / user deletion cut live sessions), and `/auth/login` + `/auth/register` are rate-limited per IP.
 - **Multi-tenant ready** — declare tenant isolation in the spec (`scope` by column ↔ JWT claim); the runtime enforces it on every read/write, no per-route code.
 - **Workflow-ready** — declare state machines (`stateMachine`) over an enum field; the runtime enforces allowed transitions and which roles may perform them.
 - **Business logic, declared not coded** — multi-tenant scope, state-machine workflows, and relation aggregates (`count`/`sum`/`avg`/`min`/`max`) all live in the spec and run in both memory and Prisma modes.

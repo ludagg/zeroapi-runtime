@@ -5,6 +5,60 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-05-31
+
+Production-scale **Prisma mode** + **auth security** release. Three runtime gaps
+from the audit are closed and proven against real PostgreSQL.
+
+### Added
+
+- **SQL query pushdown (Prisma mode).** Filtering (`?status=`, `?price[gte]=`),
+  full-text search (`?q=` → `ILIKE`), sorting (`?sort=`) and pagination
+  (`?page=&limit=` / `?cursor=`) are now translated into a single SQL query
+  (`WHERE` / `ORDER BY` / `LIMIT` / `OFFSET`) plus a real SQL `COUNT` — the
+  database no longer ships the whole table to Node. Multi-tenant scope, M2M
+  filters and the nested-route parent FK are folded into the same `WHERE` and
+  stay authoritative. Filter values are re-coerced to the declared field type so
+  a numeric-looking value on a `String` column no longer trips Prisma. Memory
+  mode is unchanged. `ResourceStore` gains `count()` and richer `ReadOptions`
+  (`orderBy` / `skip` / `take` / `cursor`).
+- **Complete relations in Prisma mode.** Nested routes
+  (`/parent/:id/children`), nested many-to-many creation, and the
+  system-resource cascade now operate against the database instead of the
+  in-memory map (previously silently broken under Prisma): the parent is checked
+  with `findUnique`, join rows are written to the DB (composite-PK join, no `id`
+  column), and `onDelete` (`Cascade` / `SetNull` / `Restrict`) is applied in the
+  DB. The cascade **and** the system-row delete run in **one
+  `prisma.$transaction`** — a failed delete rolls every child mutation back.
+- **Access-token revocation.** New `TokenRevocationStore` (memory + Prisma, one
+  read per request) backs a `jti` blacklist plus a per-user cutoff. `logout`
+  now revokes the presented access token by `jti`; deleting a user revokes all
+  of their live sessions. Backed by a generated `RevokedToken` model and
+  auto-wired alongside the other JWT Prisma stores.
+- **Per-IP auth rate limiting.** `/auth/login` and `/auth/register` are
+  throttled per IP (default 20 / 15 min) as defence-in-depth over the
+  per-account lockout. Configurable via `RuntimeOptions.authRateLimit`
+  (`{ windowMs, max }`, or `false` to disable). New
+  `createAuthRateLimitMiddleware` export.
+
+### Changed
+
+- ⚠️ **BREAKING — JWT/bearer auth now requires a configured secret.** The auth
+  middleware previously **accepted any structurally-valid (3-segment) token when
+  no secret was configured**, including unsigned `alg:none` tokens. It now
+  **fails closed**: with no secret to verify against, the token is refused
+  (`401`). The JWT user system (`auth.jwt.enabled`) is unaffected — it always
+  resolves a secret. *Migration:* set a secret for any legacy
+  `auth: { strategy: 'jwt' | 'bearer' }` config (`auth.secret` or `JWT_SECRET`).
+
+### Verified
+
+- Proven against **real PostgreSQL**: SQL pushdown (logged `WHERE`/`ORDER BY`/
+  `LIMIT`/`COUNT`, 1000 rows → 10 fetched, `EXPLAIN` shows a `Limit` node);
+  nested routes + M2M persistence + atomic cascade rollback; token rejected
+  after logout and after user deletion; no-secret refusal; `/auth/login`
+  brute-force throttled. **1066 unit tests** green; `tsc` clean.
+
 ## [0.20.1] - 2026-05-30
 
 Patch: **Prisma `@default(...)` function rendering**.
