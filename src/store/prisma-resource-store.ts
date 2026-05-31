@@ -20,6 +20,11 @@ export interface PrismaResourceDelegate {
   create(args: { data: Record<string, unknown> }): Promise<Record<string, unknown>>
   update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<Record<string, unknown>>
   delete(args: { where: { id: string } }): Promise<Record<string, unknown>>
+  // Bulk ops — used by the Prisma system-resource cascade (P0-2). Optional so a
+  // partial/mock client that doesn't implement them still satisfies the type;
+  // a real generated PrismaClient always provides them.
+  deleteMany?(args?: { where?: Record<string, unknown> }): Promise<{ count: number }>
+  updateMany?(args: { where?: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>
 }
 
 /**

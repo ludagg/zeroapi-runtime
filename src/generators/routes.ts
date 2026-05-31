@@ -19,8 +19,8 @@ import {
 import { parseQueryParams, toPrismaQuery } from '../query/builder.js'
 import { applyQuery, type PaginationMeta } from '../query/apply.js'
 import {
-  applyIncludes, extractNestedRelations, persistNestedRelations, validateIncludes,
-  type SystemResourceResolvers,
+  applyIncludes, extractNestedRelations, persistNestedRelations, persistNestedRelationsPrisma,
+  validateIncludes, type SystemResourceResolvers,
 } from '../relations/index.js'
 import { buildPrismaInclude, extractM2MFilters } from '../relations/prisma-include.js'
 import type { PrismaInclude } from '../store/resource-store.js'
@@ -672,10 +672,15 @@ function buildResourceHandlerBundle(
     }
     await resourceStore.create(id, item)
 
-    // Persist nested M2M join records atomically — rollback the main record on failure
+    // Persist nested M2M join records atomically — rollback the main record on failure.
+    // Prisma mode writes the join rows to the DB; memory mode to the shared Map.
     if (nested.length > 0) {
       try {
-        persistNestedRelations(id, nested, resource, store)
+        if (prismaClient) {
+          await persistNestedRelationsPrisma(id, nested, resource, prismaClient)
+        } else {
+          persistNestedRelations(id, nested, resource, store)
+        }
       } catch (err) {
         await resourceStore.delete(id)
         const message = err instanceof Error ? err.message : String(err)
@@ -963,16 +968,20 @@ function registerNestedRoutes(
   parent: ResourceDefinition,
   child: ResourceDefinition,
   fkField: string,
-  store: DataStore,
+  provider: ResourceStoreProvider,
   childBundle: ResourceHandlerBundle,
 ): void {
-  const parentKey = parent.name.toLowerCase()
   const childEndpoints = child.endpoints ?? DEFAULT_ENDPOINTS
   const basePath = `/:parentId/${toPlural(child.name)}`
+  // Parent existence is checked against the resolved backend — the DB in Prisma
+  // mode (findUnique), the shared Map in memory mode (P0-2). Previously this read
+  // only the Map, so every nested route 404'd in Prisma mode.
+  const parentStore = provider.for(parent.name)
 
-  const requireParent = (c: Context): Response | null => {
+  const requireParent = async (c: Context): Promise<Response | null> => {
     const parentId = c.req.param('parentId') ?? ''
-    if (!store.get(parentKey)?.has(parentId)) {
+    const found = await parentStore.get(parentId)
+    if (!found) {
       return c.json({ error: `${parent.name} with id "${parentId}" not found` }, 404)
     }
     return null
@@ -984,22 +993,22 @@ function registerNestedRoutes(
   })
 
   if (childEndpoints.includes('list')) {
-    mount(parentRouter, 'get', basePath, childBundle.guards.list, (c) => {
-      const miss = requireParent(c); if (miss) return miss
+    mount(parentRouter, 'get', basePath, childBundle.guards.list, async (c) => {
+      const miss = await requireParent(c); if (miss) return miss
       return childBundle.handleList(c, scope(c))
     })
   }
 
   if (childEndpoints.includes('create')) {
     mount(parentRouter, 'post', basePath, childBundle.guards.create, async (c) => {
-      const miss = requireParent(c); if (miss) return miss
+      const miss = await requireParent(c); if (miss) return miss
       return childBundle.handleCreate(c, scope(c))
     })
   }
 
   if (childEndpoints.includes('read')) {
-    mount(parentRouter, 'get', `${basePath}/:id`, childBundle.guards.read, (c) => {
-      const miss = requireParent(c); if (miss) return miss
+    mount(parentRouter, 'get', `${basePath}/:id`, childBundle.guards.read, async (c) => {
+      const miss = await requireParent(c); if (miss) return miss
       return childBundle.handleRead(c, scope(c))
     })
   }
@@ -1045,7 +1054,7 @@ export function generateRoutes(
     const parentEntry = built.get(parent.name)
     const childEntry  = built.get(child.name)
     if (!parentEntry || !childEntry) continue
-    registerNestedRoutes(parentEntry.router, parent, child, fkField, store, childEntry.bundle)
+    registerNestedRoutes(parentEntry.router, parent, child, fkField, provider, childEntry.bundle)
   }
 
   for (const resource of spec.resources) {

@@ -119,7 +119,7 @@ export {
   validateIncludes, normalizeTopLevelRelations,
   SYSTEM_RESOURCES, SYSTEM_RESOURCE_SAFE_FIELDS,
   isSystemResourceName, isSystemResourceActive, projectSystemResource,
-  cascadeSystemResourceDelete,
+  cascadeSystemResourceDelete, cascadeSystemResourceDeletePrisma,
 } from './relations/index.js'
 export type {
   IncludeValidationResult, IncludeOwnershipContext,

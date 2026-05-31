@@ -49,13 +49,15 @@ import {
   type InboundRoutesOptions,
 } from '../webhooks/index.js'
 import {
-  cascadeSystemResourceDelete, type SystemResourceResolvers, type CascadeResult,
+  cascadeSystemResourceDelete, cascadeSystemResourceDeletePrisma,
+  type SystemResourceResolvers, type CascadeResult,
 } from '../relations/index.js'
 import {
   MemoryResourceStoreProvider, type ResourceStoreProvider,
 } from '../store/resource-store.js'
 import {
-  PrismaResourceStoreProvider, type PrismaResourceLikeClient,
+  PrismaResourceStoreProvider, prismaResourceDelegateName,
+  type PrismaResourceLikeClient,
 } from '../store/prisma-resource-store.js'
 import { tryAutoLoadPrismaResourceClient } from '../store/resource-store-autodetect.js'
 
@@ -422,13 +424,33 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   // relations and enforces onDelete (Cascade / SetNull / Restrict) before
   // removing the system row itself.
   const userStoreRef = userStore
+  // Prisma client backing the user-defined resources (P0-2). When present, the
+  // cascade runs against the DB inside a single $transaction; otherwise it runs
+  // against the in-memory Map.
+  const resourcePrismaClient = resourceStoreProvider.prismaClient?.()
   const deleteSystemResource = userStoreRef
     ? async (name: string, id: string): Promise<CascadeResult> => {
         if (name !== 'User') {
           throw new Error(`deleteSystemResource: "${name}" is not supported (only "User")`)
         }
-        // Restrict checks run first inside cascadeSystemResourceDelete — it
-        // throws before mutating anything if any FK is restricted.
+        // Prisma: Restrict-check + Cascade + SetNull + the User delete itself all
+        // run in ONE atomic $transaction — if the User delete fails (e.g. a
+        // remaining required FK), every child mutation is rolled back.
+        if (resourcePrismaClient) {
+          const tx$ = resourcePrismaClient as unknown as {
+            $transaction: <T>(fn: (tx: PrismaResourceLikeClient) => Promise<T>) => Promise<T>
+          }
+          return tx$.$transaction(async (tx) => {
+            const result = await cascadeSystemResourceDeletePrisma(spec, tx, 'User', id)
+            const userDelegate = tx[prismaResourceDelegateName('User')]
+            if (userDelegate && typeof userDelegate.delete === 'function') {
+              await userDelegate.delete({ where: { id } })
+            }
+            return result
+          })
+        }
+        // Memory: Restrict checks run first inside cascadeSystemResourceDelete —
+        // it throws before mutating anything if any FK is restricted.
         const result = cascadeSystemResourceDelete(spec, store, 'User', id)
         if ('delete' in userStoreRef && typeof (userStoreRef as { delete?: unknown }).delete === 'function') {
           await (userStoreRef as { delete: (id: string) => Promise<boolean> }).delete(id)
