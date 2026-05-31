@@ -11,6 +11,7 @@ import {
 } from './jwt.js'
 import type { UserRecord, UserStore } from './user-store.js'
 import type { RefreshTokenStore } from './refresh-token-store.js'
+import type { TokenRevocationStore } from './token-revocation-store.js'
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -44,6 +45,7 @@ export function mountJwtAuthRoutes(
   secret: string,
   users: UserStore,
   refreshTokens: RefreshTokenStore,
+  revocationStore?: TokenRevocationStore,
 ): void {
   const accessTtlSec = getAccessTokenTTL(config)
   const refreshTtlSec = getRefreshTokenTTL(config)
@@ -139,6 +141,16 @@ export function mountJwtAuthRoutes(
   app.post('/auth/logout', async (c) => {
     let body: Record<string, unknown>
     try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON body' }, 400) }
+
+    // P1: revoke the presented ACCESS token (by jti) so a stolen copy can't be
+    // reused before its natural expiry — not just the refresh token.
+    if (revocationStore) {
+      const auth = c.req.header('Authorization')
+      if (auth?.startsWith('Bearer ')) {
+        const payload = await verifyAccessToken(auth.slice(7).trim(), secret)
+        if (payload) await revocationStore.revokeJti(payload.jti, new Date(payload.exp * 1000))
+      }
+    }
 
     const incoming = parseRefreshTokenBody(body)
     if (incoming) {

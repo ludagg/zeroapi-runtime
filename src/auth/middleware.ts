@@ -4,6 +4,7 @@ import { verify } from 'hono/jwt'
 import { timingSafeEqual } from 'crypto'
 import type { ApiKeyStore } from './apikey-store.js'
 import { hashApiKey } from './apikey.js'
+import type { TokenRevocationStore } from './token-revocation-store.js'
 
 export class AuthError extends Error {
   constructor(
@@ -59,32 +60,50 @@ async function tryApiKey(
   return true
 }
 
-async function tryJwt(c: Context, secret: string | undefined): Promise<boolean> {
+async function tryJwt(
+  c: Context,
+  secret: string | undefined,
+  revocationStore?: TokenRevocationStore,
+): Promise<boolean> {
   const header = c.req.header('Authorization')
   if (!header) return false
   const token = header.startsWith('Bearer ') ? header.slice(7) : header
   if (!token) return false
 
-  if (secret) {
-    try {
-      const payload = await verify(token, secret, 'HS256') as Record<string, unknown>
-      if (typeof payload['sub'] === 'string') {
-        c.set('user', {
-          sub: payload['sub'],
-          email: typeof payload['email'] === 'string' ? payload['email'] : undefined,
-          role: typeof payload['role'] === 'string' ? payload['role'] : undefined,
-          // Full verified payload, so scope rules can read arbitrary claims
-          // (e.g. organizationId) for multi-tenant row-level scoping.
-          claims: payload,
-        })
-      }
-      return true
-    } catch {
-      return false
+  // Fail closed: without a configured secret we cannot verify the signature, so
+  // we REFUSE the token rather than trust an unverified 3-segment structure.
+  if (!secret) return false
+
+  try {
+    const payload = await verify(token, secret, 'HS256') as Record<string, unknown>
+    // P1: reject revoked tokens (single-session logout or per-user cutoff).
+    if (
+      revocationStore &&
+      typeof payload['jti'] === 'string' &&
+      typeof payload['sub'] === 'string' &&
+      typeof payload['iat'] === 'number'
+    ) {
+      const revoked = await revocationStore.isRevoked({
+        jti: payload['jti'] as string,
+        sub: payload['sub'] as string,
+        iat: payload['iat'] as number,
+      })
+      if (revoked) return false
     }
+    if (typeof payload['sub'] === 'string') {
+      c.set('user', {
+        sub: payload['sub'],
+        email: typeof payload['email'] === 'string' ? payload['email'] : undefined,
+        role: typeof payload['role'] === 'string' ? payload['role'] : undefined,
+        // Full verified payload, so scope rules can read arbitrary claims
+        // (e.g. organizationId) for multi-tenant row-level scoping.
+        claims: payload,
+      })
+    }
+    return true
+  } catch {
+    return false
   }
-  // No secret configured — fall back to structural check only.
-  return token.split('.').length === 3
 }
 
 /**
@@ -101,6 +120,7 @@ export function createAuthMiddleware(
   config: GlobalAuthConfig,
   apiKeyStore?: ApiKeyStore,
   jwtSecret?: string,
+  revocationStore?: TokenRevocationStore,
 ): MiddlewareHandler {
   const apiKeyOn = isApiKeyStrategy(config)
   const jwtOn = isJwtUserSystemEnabled(config)
@@ -122,7 +142,7 @@ export function createAuthMiddleware(
     // When both strategies are active, accept either — JWT-via-Bearer first
     // (so an Authorization header isn't mistaken for an API key), then apikey.
     if (jwtOn && apiKeyOn) {
-      if (await tryJwt(c, effectiveJwtSecret)) { await next(); return }
+      if (await tryJwt(c, effectiveJwtSecret, revocationStore)) { await next(); return }
       if (await tryApiKey(c, apiKeyStore!, apiKeyHeader)) { await next(); return }
       return c.json({ error: 'Authentication required' }, 401)
     }
@@ -133,7 +153,7 @@ export function createAuthMiddleware(
     }
 
     if (jwtOn) {
-      if (await tryJwt(c, effectiveJwtSecret)) { await next(); return }
+      if (await tryJwt(c, effectiveJwtSecret, revocationStore)) { await next(); return }
       return c.json({ error: 'Invalid or expired token' }, 401)
     }
 
@@ -154,17 +174,18 @@ export function createAuthMiddleware(
         return c.json({ error: 'Token missing from Authorization header' }, 401)
       }
 
-      if (config.secret) {
-        try {
-          await verify(token, config.secret, 'HS256')
-        } catch {
-          return c.json({ error: 'Invalid or expired token' }, 401)
-        }
-      } else {
-        const parts = token.split('.')
-        if (parts.length !== 3) {
-          return c.json({ error: 'Invalid JWT structure' }, 401)
-        }
+      // Fail closed: a jwt/bearer strategy with no configured secret cannot
+      // verify signatures, so refuse rather than accept an unverified token.
+      if (!config.secret) {
+        return c.json(
+          { error: 'Server auth misconfigured: no secret configured to verify tokens' },
+          401,
+        )
+      }
+      try {
+        await verify(token, config.secret, 'HS256')
+      } catch {
+        return c.json({ error: 'Invalid or expired token' }, 401)
       }
     }
 

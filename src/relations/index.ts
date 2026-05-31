@@ -4,6 +4,9 @@ import type {
 } from '../types/spec.js'
 import { toPlural } from '../utils/plural.js'
 import type { DataStore } from '../generators/routes.js'
+import {
+  prismaResourceDelegateName, type PrismaResourceLikeClient,
+} from '../store/prisma-resource-store.js'
 
 type Row = Record<string, unknown>
 
@@ -873,6 +876,61 @@ export function persistNestedRelations(
   }
 }
 
+/**
+ * Prisma-mode twin of {@link persistNestedRelations} (P0-2). Writes nested
+ * many-to-many join rows to the DATABASE instead of the in-memory Map, and
+ * verifies referenced rows exist via a real `findUnique`.
+ *
+ * Naming mirrors the schema generator (`renderJoinModels`) and the memory path
+ * for parity: the join model is `snakeToPascal(through)`, its columns are
+ * `<this>Id` / `<other>Id`, and it has a COMPOSITE primary key (no `id` column),
+ * so the created row carries only the two FKs plus any declared extra fields.
+ */
+export async function persistNestedRelationsPrisma(
+  parentId: string,
+  nested: Array<{ rel: RelationDefinition; items: Row[] }>,
+  resource: ResourceDefinition,
+  client: PrismaResourceLikeClient,
+): Promise<void> {
+  const pascal = (n: string) => n.charAt(0).toUpperCase() + n.slice(1)
+
+  for (const { rel, items } of nested) {
+    const joinModel = snakeToPascal(rel.through ?? `${pascal(resource.name)}${pascal(rel.resource)}`)
+    const joinDelegateName = prismaResourceDelegateName(joinModel)
+    const joinDelegate = client[joinDelegateName]
+    if (!joinDelegate || typeof joinDelegate.create !== 'function') {
+      throw new Error(`persistNestedRelationsPrisma: no Prisma delegate "${joinDelegateName}" for join model "${joinModel}"`)
+    }
+    const relatedDelegateName = prismaResourceDelegateName(rel.resource)
+    const relatedDelegate = client[relatedDelegateName]
+
+    const thisFk = `${resource.name.toLowerCase()}Id`
+    const otherFk = `${rel.resource.toLowerCase()}Id`
+
+    for (const item of items) {
+      const relatedId = (item[otherFk] ?? item['id']) as string | undefined
+      if (!relatedId) {
+        throw new Error(`Nested relation item for ${rel.resource} is missing "${otherFk}"`)
+      }
+      // Existence check against the DB — mirrors the memory path's `has()`.
+      const exists = relatedDelegate && typeof relatedDelegate.findUnique === 'function'
+        ? await relatedDelegate.findUnique({ where: { id: relatedId } })
+        : null
+      if (!exists) {
+        throw new Error(`${rel.resource} with id "${relatedId}" not found — nested items must reference existing records`)
+      }
+
+      const extraFields = Object.entries(rel.fields ?? {}).reduce<Row>((acc, [name]) => {
+        if (item[name] !== undefined) acc[name] = item[name]
+        return acc
+      }, {})
+
+      // No `id` — the synthetic join has a composite PK [thisFk, otherFk].
+      await joinDelegate.create({ data: { [thisFk]: parentId, [otherFk]: relatedId, ...extraFields } })
+    }
+  }
+}
+
 // ── System-resource cascade ───────────────────────────────────────────────────
 
 /** Outcome of a system-resource cascade. Lists ids touched on each user-defined
@@ -954,6 +1012,77 @@ export function cascadeSystemResourceDelete(
         if (matchedIds.length > 0) result.setNull[resource.name] = matchedIds
       }
       // NoAction (or unset) → leave the FK pointing at a now-missing row
+    }
+  }
+
+  return result
+}
+
+/**
+ * Prisma-mode twin of {@link cascadeSystemResourceDelete} (P0-2). Applies the
+ * SAME Restrict → Cascade → SetNull semantics against a REAL database.
+ *
+ * `client` is expected to be a Prisma TRANSACTION client (`tx`): the caller
+ * wraps this call AND the deletion of the system row itself in a single
+ * `$transaction`, so the whole cascade is atomic — if any later step (e.g. the
+ * User delete) fails, every child mutation is rolled back.
+ *
+ * Restrict runs first and throws before any mutation, exactly like the memory
+ * version. Returns the real ids touched so callers/audits can verify.
+ */
+export async function cascadeSystemResourceDeletePrisma(
+  spec: ZeroAPISpec,
+  client: PrismaResourceLikeClient,
+  systemResource: string,
+  id: string,
+): Promise<CascadeResult> {
+  const result: CascadeResult = { deleted: {}, setNull: {}, restricted: [] }
+
+  // First pass: Restrict — bail (throw) before mutating anything.
+  for (const resource of spec.resources) {
+    for (const rel of resource.relations ?? []) {
+      if (rel.resource !== systemResource) continue
+      if (rel.type !== 'manyToOne' && rel.type !== 'oneToOne') continue
+      if (rel.onDelete !== 'Restrict') continue
+      const fk = rel.field ?? `${systemResource.toLowerCase()}Id`
+      const delegate = client[prismaResourceDelegateName(resource.name)]
+      if (!delegate || typeof delegate.count !== 'function') continue
+      const count = await delegate.count({ where: { [fk]: id } })
+      if (count > 0) {
+        result.restricted.push({ resource: resource.name, count })
+        throw new Error(
+          `Cannot delete ${systemResource} "${id}" — ${count} ${resource.name} row(s) still reference it (onDelete: Restrict)`,
+        )
+      }
+    }
+  }
+
+  // Second pass: Cascade + SetNull.
+  for (const resource of spec.resources) {
+    for (const rel of resource.relations ?? []) {
+      if (rel.resource !== systemResource) continue
+      if (rel.type !== 'manyToOne' && rel.type !== 'oneToOne') continue
+      const fk = rel.field ?? `${systemResource.toLowerCase()}Id`
+      const delegate = client[prismaResourceDelegateName(resource.name)]
+      if (!delegate || typeof delegate.findMany !== 'function') continue
+
+      const matched = await delegate.findMany({ where: { [fk]: id } })
+      const matchedIds = matched.map((row) => row['id'] as string)
+      if (matchedIds.length === 0) continue
+
+      if (rel.onDelete === 'Cascade') {
+        if (typeof delegate.deleteMany === 'function') {
+          await delegate.deleteMany({ where: { [fk]: id } })
+        }
+        result.deleted[resource.name] = matchedIds
+      } else if (rel.onDelete === 'SetNull') {
+        if (typeof delegate.updateMany === 'function') {
+          await delegate.updateMany({ where: { [fk]: id }, data: { [fk]: null } })
+        }
+        result.setNull[resource.name] = matchedIds
+      }
+      // NoAction (or unset) → leave the FK as-is (the DB may reject the parent
+      // delete on a required FK; the surrounding $transaction then rolls back).
     }
   }
 

@@ -1,8 +1,10 @@
 import { createRequire } from 'node:module'
 import { PrismaUserStore, type PrismaUserLikeClient } from './prisma-user-store.js'
 import { PrismaRefreshTokenStore, type PrismaRefreshTokenLikeClient } from './prisma-refresh-token-store.js'
+import { PrismaTokenRevocationStore, type PrismaRevocationLikeClient } from './prisma-token-revocation-store.js'
 import type { UserStore } from './user-store.js'
 import type { RefreshTokenStore } from './refresh-token-store.js'
+import type { TokenRevocationStore } from './token-revocation-store.js'
 
 declare const require: NodeRequire | undefined
 
@@ -25,19 +27,21 @@ function resolveRequire(): NodeRequire | null {
 export function tryAutoLoadPrismaJwtStores(): {
   userStore: UserStore
   refreshTokenStore: RefreshTokenStore
+  revocationStore: TokenRevocationStore
 } | null {
   if (!process.env['DATABASE_URL']) return null
   const req = resolveRequire()
   if (!req) return null
   try {
     const mod = req('@prisma/client') as {
-      PrismaClient?: new () => PrismaUserLikeClient & PrismaRefreshTokenLikeClient
+      PrismaClient?: new () => PrismaUserLikeClient & PrismaRefreshTokenLikeClient & PrismaRevocationLikeClient
     }
     if (!mod?.PrismaClient) return null
     const client = new mod.PrismaClient()
     return {
       userStore: new PrismaUserStore(client),
       refreshTokenStore: new PrismaRefreshTokenStore(client),
+      revocationStore: new PrismaTokenRevocationStore(client),
     }
   } catch {
     return null

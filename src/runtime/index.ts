@@ -24,7 +24,13 @@ import { PrismaUserStore, type PrismaUserLikeClient } from '../auth/prisma-user-
 import { PrismaRefreshTokenStore, type PrismaRefreshTokenLikeClient } from '../auth/prisma-refresh-token-store.js'
 import { tryAutoLoadPrismaJwtStores } from '../auth/jwt-autodetect.js'
 import { mountJwtAuthRoutes } from '../auth/jwt-routes.js'
-import { resolveJwtSecret, type JwtSecretLogger } from '../auth/jwt.js'
+import { resolveJwtSecret, getAccessTokenTTL, type JwtSecretLogger } from '../auth/jwt.js'
+import {
+  MemoryTokenRevocationStore, type TokenRevocationStore,
+} from '../auth/token-revocation-store.js'
+import {
+  PrismaTokenRevocationStore, type PrismaRevocationLikeClient,
+} from '../auth/prisma-token-revocation-store.js'
 import { MemoryOAuthAccountStore, type OAuthAccountStore } from '../auth/oauth-account-store.js'
 import { MemoryOAuthStateStore, type OAuthStateStore } from '../auth/oauth-state.js'
 import { mountOAuthRoutes } from '../auth/oauth-routes.js'
@@ -32,6 +38,9 @@ import { resolveOAuthBaseUrl, type OAuthWarningLogger } from '../auth/oauth-conf
 import { createHelmetMiddleware } from '../security/helmet.js'
 import { createCorsMiddleware } from '../security/cors.js'
 import { createRateLimitMiddleware } from '../security/ratelimit.js'
+import {
+  createAuthRateLimitMiddleware, DEFAULT_AUTH_RATE_LIMIT, type AuthRateLimitConfig,
+} from '../security/auth-ratelimit.js'
 import { createSanitizeMiddleware } from '../security/sanitize.js'
 import { generateOpenAPISpec } from '../docs/swagger.js'
 import { mountScalarDocs } from '../docs/scalar.js'
@@ -49,13 +58,15 @@ import {
   type InboundRoutesOptions,
 } from '../webhooks/index.js'
 import {
-  cascadeSystemResourceDelete, type SystemResourceResolvers, type CascadeResult,
+  cascadeSystemResourceDelete, cascadeSystemResourceDeletePrisma,
+  type SystemResourceResolvers, type CascadeResult,
 } from '../relations/index.js'
 import {
   MemoryResourceStoreProvider, type ResourceStoreProvider,
 } from '../store/resource-store.js'
 import {
-  PrismaResourceStoreProvider, type PrismaResourceLikeClient,
+  PrismaResourceStoreProvider, prismaResourceDelegateName,
+  type PrismaResourceLikeClient,
 } from '../store/prisma-resource-store.js'
 import { tryAutoLoadPrismaResourceClient } from '../store/resource-store-autodetect.js'
 
@@ -103,6 +114,18 @@ export interface RuntimeOptions {
   userStore?: UserStore
   /** Phase 1.2: explicit refresh-token store. Same resolution rules as `userStore`. */
   refreshTokenStore?: RefreshTokenStore
+  /**
+   * P1: explicit access-token revocation store (jti blacklist + per-user
+   * cutoff). Defaults to `PrismaTokenRevocationStore` when a Prisma client is
+   * detected, otherwise `MemoryTokenRevocationStore`.
+   */
+  revocationStore?: TokenRevocationStore
+  /**
+   * P1: per-IP rate limit on `/auth/login` + `/auth/register`. Defaults to
+   * 20 requests / 15 min per IP. Pass a custom `{ windowMs, max }` to harden in
+   * production, or `false` to disable.
+   */
+  authRateLimit?: AuthRateLimitConfig | false
   /** Phase 1.2: Prisma client to back the user / refresh-token stores. */
   prismaJwt?: PrismaUserLikeClient & PrismaRefreshTokenLikeClient
   /** Phase 1.2: receives the JWT secret warning when an ephemeral secret is used in dev. */
@@ -208,6 +231,8 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     apiKeyBootstrapLogger,
     userStore: providedUserStore,
     refreshTokenStore: providedRefreshTokenStore,
+    revocationStore: providedRevocationStore,
+    authRateLimit,
     prismaJwt,
     jwtSecretLogger,
     oauthAccountStore: providedOAuthAccountStore,
@@ -294,19 +319,33 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   let jwtSecret: string | undefined
   let userStore: UserStore | undefined
   let refreshTokenStore: RefreshTokenStore | undefined
+  // P1: access-token revocation store (jti blacklist + per-user cutoff).
+  let revocationStore: TokenRevocationStore | undefined
 
   if (spec.auth && jwtUserSystemEnabled) {
     jwtSecret = resolveJwtSecret(spec.auth, jwtSecretLogger)
     const resolved = resolveJwtStores({
       providedUserStore,
       providedRefreshTokenStore,
+      ...(providedRevocationStore ? { providedRevocationStore } : {}),
       prismaJwt,
     })
     userStore = resolved.userStore
     refreshTokenStore = resolved.refreshTokenStore
+    revocationStore = resolved.revocationStore
   }
 
-  const authMiddleware = spec.auth ? createAuthMiddleware(spec.auth, apiKeyStore, jwtSecret) : undefined
+  const authMiddleware = spec.auth ? createAuthMiddleware(spec.auth, apiKeyStore, jwtSecret, revocationStore) : undefined
+
+  // P1: per-IP rate limit on auth endpoints (brute-force defence; configurable
+  // via `authRateLimit`, disablable with `false`). Registered BEFORE the auth
+  // routes so Hono runs it first; covers both the JWT user system and legacy
+  // auth flows.
+  if (authRateLimit !== false && (jwtUserSystemEnabled || spec.authFlows)) {
+    const authRlMw = createAuthRateLimitMiddleware(authRateLimit ?? DEFAULT_AUTH_RATE_LIMIT, rateLimitStore)
+    app.use('/auth/login', authRlMw)
+    app.use('/auth/register', authRlMw)
+  }
 
   // Phase 1.1: admin routes for managing API keys (protected by the auth middleware itself)
   if (spec.auth && apiKeyStore && authMiddleware) {
@@ -315,7 +354,7 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
 
   // Phase 1.2: JWT user routes — must mount BEFORE generateRoutes so /auth/* paths win
   if (spec.auth && jwtUserSystemEnabled && jwtSecret && userStore && refreshTokenStore) {
-    mountJwtAuthRoutes(app, spec.auth, jwtSecret, userStore, refreshTokenStore)
+    mountJwtAuthRoutes(app, spec.auth, jwtSecret, userStore, refreshTokenStore, revocationStore)
   }
 
   // Phase 1.4: OAuth routes — same constraint (mount before generateRoutes).
@@ -422,17 +461,50 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   // relations and enforces onDelete (Cascade / SetNull / Restrict) before
   // removing the system row itself.
   const userStoreRef = userStore
+  // Prisma client backing the user-defined resources (P0-2). When present, the
+  // cascade runs against the DB inside a single $transaction; otherwise it runs
+  // against the in-memory Map.
+  const resourcePrismaClient = resourceStoreProvider.prismaClient?.()
+  const revocationStoreRef = revocationStore
+  // P1: cut every live session of the deleted user — revoke all access tokens
+  // issued before now. Runs AFTER the delete succeeds, so a rolled-back cascade
+  // (failed delete) leaves the user and their sessions intact.
+  const revokeDeletedUserSessions = async (id: string): Promise<void> => {
+    if (!revocationStoreRef) return
+    const now = new Date()
+    const ttlSec = spec.auth ? getAccessTokenTTL(spec.auth) : 15 * 60
+    await revocationStoreRef.revokeUser(id, now, new Date(now.getTime() + ttlSec * 1000))
+  }
   const deleteSystemResource = userStoreRef
     ? async (name: string, id: string): Promise<CascadeResult> => {
         if (name !== 'User') {
           throw new Error(`deleteSystemResource: "${name}" is not supported (only "User")`)
         }
-        // Restrict checks run first inside cascadeSystemResourceDelete — it
-        // throws before mutating anything if any FK is restricted.
+        // Prisma: Restrict-check + Cascade + SetNull + the User delete itself all
+        // run in ONE atomic $transaction — if the User delete fails (e.g. a
+        // remaining required FK), every child mutation is rolled back.
+        if (resourcePrismaClient) {
+          const tx$ = resourcePrismaClient as unknown as {
+            $transaction: <T>(fn: (tx: PrismaResourceLikeClient) => Promise<T>) => Promise<T>
+          }
+          const result = await tx$.$transaction(async (tx) => {
+            const r = await cascadeSystemResourceDeletePrisma(spec, tx, 'User', id)
+            const userDelegate = tx[prismaResourceDelegateName('User')]
+            if (userDelegate && typeof userDelegate.delete === 'function') {
+              await userDelegate.delete({ where: { id } })
+            }
+            return r
+          })
+          await revokeDeletedUserSessions(id)
+          return result
+        }
+        // Memory: Restrict checks run first inside cascadeSystemResourceDelete —
+        // it throws before mutating anything if any FK is restricted.
         const result = cascadeSystemResourceDelete(spec, store, 'User', id)
         if ('delete' in userStoreRef && typeof (userStoreRef as { delete?: unknown }).delete === 'function') {
           await (userStoreRef as { delete: (id: string) => Promise<boolean> }).delete(id)
         }
+        await revokeDeletedUserSessions(id)
         return result
       }
     : undefined
@@ -537,12 +609,14 @@ function resolveApiKeyStore(opts: {
 function resolveJwtStores(opts: {
   providedUserStore?: UserStore
   providedRefreshTokenStore?: RefreshTokenStore
+  providedRevocationStore?: TokenRevocationStore
   prismaJwt?: PrismaUserLikeClient & PrismaRefreshTokenLikeClient
-}): { userStore: UserStore; refreshTokenStore: RefreshTokenStore } {
+}): { userStore: UserStore; refreshTokenStore: RefreshTokenStore; revocationStore: TokenRevocationStore } {
   if (opts.providedUserStore && opts.providedRefreshTokenStore) {
     return {
       userStore: opts.providedUserStore,
       refreshTokenStore: opts.providedRefreshTokenStore,
+      revocationStore: opts.providedRevocationStore ?? new MemoryTokenRevocationStore(),
     }
   }
 
@@ -551,6 +625,9 @@ function resolveJwtStores(opts: {
       userStore: opts.providedUserStore ?? new PrismaUserStore(opts.prismaJwt),
       refreshTokenStore:
         opts.providedRefreshTokenStore ?? new PrismaRefreshTokenStore(opts.prismaJwt),
+      revocationStore:
+        opts.providedRevocationStore ??
+        new PrismaTokenRevocationStore(opts.prismaJwt as unknown as PrismaRevocationLikeClient),
     }
   }
 
@@ -559,6 +636,7 @@ function resolveJwtStores(opts: {
     return {
       userStore: opts.providedUserStore ?? autodetected.userStore,
       refreshTokenStore: opts.providedRefreshTokenStore ?? autodetected.refreshTokenStore,
+      revocationStore: opts.providedRevocationStore ?? autodetected.revocationStore,
     }
   }
 
@@ -573,5 +651,6 @@ function resolveJwtStores(opts: {
   return {
     userStore: opts.providedUserStore ?? new MemoryUserStore(),
     refreshTokenStore: opts.providedRefreshTokenStore ?? new MemoryRefreshTokenStore(),
+    revocationStore: opts.providedRevocationStore ?? new MemoryTokenRevocationStore(),
   }
 }

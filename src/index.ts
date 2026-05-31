@@ -13,6 +13,8 @@ export { generateSdk } from './sdk/generate.js'
 export { createHelmetMiddleware } from './security/helmet.js'
 export { createCorsMiddleware } from './security/cors.js'
 export { createRateLimitMiddleware } from './security/ratelimit.js'
+export { createAuthRateLimitMiddleware, DEFAULT_AUTH_RATE_LIMIT } from './security/auth-ratelimit.js'
+export type { AuthRateLimitConfig } from './security/auth-ratelimit.js'
 export { createSanitizeMiddleware } from './security/sanitize.js'
 export { createAuthMiddleware, AuthError } from './auth/middleware.js'
 
@@ -42,6 +44,11 @@ export { PrismaUserStore } from './auth/prisma-user-store.js'
 export { PrismaRefreshTokenStore } from './auth/prisma-refresh-token-store.js'
 export { tryAutoLoadPrismaJwtStores } from './auth/jwt-autodetect.js'
 export { mountJwtAuthRoutes } from './auth/jwt-routes.js'
+// ── Token revocation (P1) ─────────────────────────────────────────────────────
+export { MemoryTokenRevocationStore } from './auth/token-revocation-store.js'
+export { PrismaTokenRevocationStore } from './auth/prisma-token-revocation-store.js'
+export type { TokenRevocationStore, RevokedTokenInfo } from './auth/token-revocation-store.js'
+export type { PrismaRevocationLikeClient, PrismaRevokedTokenDelegate } from './auth/prisma-token-revocation-store.js'
 export type { PasswordHash } from './auth/password.js'
 export type { JwtPayload, JwtSecretLogger } from './auth/jwt.js'
 export type { UserStore, UserRecord, CreateUserInput, CreateOAuthUserInput } from './auth/user-store.js'
@@ -119,7 +126,7 @@ export {
   validateIncludes, normalizeTopLevelRelations,
   SYSTEM_RESOURCES, SYSTEM_RESOURCE_SAFE_FIELDS,
   isSystemResourceName, isSystemResourceActive, projectSystemResource,
-  cascadeSystemResourceDelete,
+  cascadeSystemResourceDelete, cascadeSystemResourceDeletePrisma,
 } from './relations/index.js'
 export type {
   IncludeValidationResult, IncludeOwnershipContext,

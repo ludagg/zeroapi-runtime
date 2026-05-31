@@ -15,11 +15,24 @@ export type PrismaInclude = Record<
   boolean | { include?: PrismaInclude; where?: Record<string, unknown> }
 >
 
-/** Per-read options. `include` / `where` only take effect in Prisma mode. */
+/** Per-read options. All fields except none take effect only in Prisma mode —
+ *  the memory store ignores `include` / `where` / `orderBy` / `skip` / `take` /
+ *  `cursor` and returns the full collection unordered (filtering, sorting and
+ *  pagination are applied in memory by `applyQuery`). In Prisma mode they are
+ *  pushed straight into the SQL query (P0-1 query pushdown). */
 export interface ReadOptions {
   include?: PrismaInclude
-  /** Native Prisma `where` (e.g. a many-to-many `some` filter). */
+  /** Native Prisma `where` (e.g. a many-to-many `some` filter, scalar filters,
+   *  ownership/tenant scope, full-text search OR clause). */
   where?: Record<string, unknown>
+  /** Native Prisma `orderBy` (list of single-key `{ field: 'asc'|'desc' }`). */
+  orderBy?: Array<Record<string, 'asc' | 'desc'>>
+  /** Number of rows to skip (offset pagination, or `1` past a cursor). */
+  skip?: number
+  /** Maximum number of rows to return (page size). */
+  take?: number
+  /** Cursor anchor for keyset pagination (`{ id }`). */
+  cursor?: { id: string }
 }
 
 /**
@@ -40,6 +53,13 @@ export interface ReadOptions {
 export interface ResourceStore {
   /** Every record in the collection, unordered. */
   list(opts?: ReadOptions): Promise<Array<Record<string, unknown>>>
+  /**
+   * Total number of records matching `where` (no pagination). Backs the SQL
+   * `count` used for pagination metadata in Prisma mode. The memory store
+   * implements it for interface completeness but the memory route path never
+   * calls it (it counts in memory via `applyQuery`).
+   */
+  count(where?: Record<string, unknown>): Promise<number>
   /** A single record by id, or `undefined` when it does not exist. */
   get(id: string, opts?: ReadOptions): Promise<Record<string, unknown> | undefined>
   /** Persist a brand-new record keyed by `id`. Returns the stored record. */
@@ -77,10 +97,16 @@ export interface ResourceStoreProvider {
 export class MemoryResourceStore implements ResourceStore {
   constructor(private readonly map: ResourceMap) {}
 
-  // `include` is intentionally ignored here — memory-mode relations are resolved
-  // by `applyIncludes` against the shared DataStore, exactly as before.
+  // `include` / `where` / `orderBy` / `skip` / `take` / `cursor` are intentionally
+  // ignored here — memory-mode relations are resolved by `applyIncludes` and the
+  // route applies filtering/sorting/pagination via `applyQuery`, exactly as before.
   async list(_opts?: ReadOptions): Promise<Array<Record<string, unknown>>> {
     return Array.from(this.map.values())
+  }
+
+  // Interface completeness only — the memory route path counts in memory.
+  async count(_where?: Record<string, unknown>): Promise<number> {
+    return this.map.size
   }
 
   async get(id: string, _opts?: ReadOptions): Promise<Record<string, unknown> | undefined> {
