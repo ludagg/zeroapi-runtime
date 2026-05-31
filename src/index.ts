@@ -144,7 +144,7 @@ export { generatePresignedPutUrl } from './upload/providers/s3.js'
 
 // ── Webhooks (Phase 3.3) ──────────────────────────────────────────────────────
 export {
-  MemoryWebhookStore,
+  MemoryWebhookStore, PrismaWebhookStore, tryAutoLoadPrismaWebhookStore,
   WebhookWorker, computeBackoffDelay, endpointSubscribesTo,
   emitWebhook, buildResourceEventType,
   signPayload, verifySignature, generateWebhookSecret,
@@ -158,6 +158,8 @@ export type {
   ClaimEventsOptions, UpdateAfterAttemptInput,
   EmitWebhookOptions, WebhookWorkerOptions,
   AdminRoutesOptions, InboundSourceConfig, InboundRoutesOptions, InboundEventRecord,
+  PrismaWebhookLikeClient, PrismaWebhookEndpointDelegate, PrismaWebhookEventDelegate,
+  PrismaWebhookEndpointRow, PrismaWebhookEventRow,
 } from './webhooks/index.js'
 
 // ── Storage (Phase 3.2) ───────────────────────────────────────────────────────
