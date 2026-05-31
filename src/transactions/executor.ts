@@ -31,9 +31,13 @@ export async function executeTransaction(
   }
 
   const results: Row[] = []
+  // Track the operation currently executing so a failure reports the REAL one
+  // (e.g. "decrement Product") instead of stringifying an object to "[object Object]".
+  let failed: TxOperation | undefined
 
   try {
     for (const op of operations) {
+      failed = op
       const result = await executeOperation(op, requestBody, store)
       results.push(result)
     }
@@ -48,7 +52,7 @@ export async function executeTransaction(
       success: false,
       results: [],
       error: message,
-      failedOperation: `${operations.find((op) => op.action)}`,
+      failedOperation: failed ? `${failed.action} ${failed.resource}` : undefined,
     }
   }
 }
