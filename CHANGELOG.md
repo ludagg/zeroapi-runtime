@@ -5,6 +5,44 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-06-01
+
+Security + correctness + deploy-ergonomics release. Completes the audit's
+remaining runtime gaps. All proven against real PostgreSQL.
+
+### Added
+
+- **Webhook signing secrets encrypted at rest (AES-256-GCM).** A key
+  (`RuntimeOptions.webhookSecretEncryptionKey` or `WEBHOOK_SECRET_ENCRYPTION_KEY`)
+  enables encryption: secrets are stored as `enc:v1:…` and decrypted only when
+  signing. Without a key, secrets stay in clear (a one-time warning is logged) and
+  legacy plaintext secrets keep working — tolerant decrypt, no migration. New
+  `createWebhookSecretCipher`.
+- **Opt-in schema-migration helpers.** `writePrismaSchema(spec, path)` (pure I/O),
+  `pushPrismaSchema(opts)` (dev/prototype — `prisma db push`), and
+  `deployPrismaMigrations(opts)` (production — `prisma migrate deploy`, never
+  destructive). `createRuntime` never touches the database. `db push` is skipped
+  without `DATABASE_URL`, refused in `NODE_ENV=production` unless
+  `allowProduction: true`, and never passes `--accept-data-loss` unless
+  `acceptDataLoss: true`.
+
+### Fixed
+
+- **Memory-mode transactions are now serialized (concurrency-safe).** Concurrent
+  in-memory transactions could interleave in the snapshot→commit/rollback window,
+  and a failed one's rollback could erase a concurrent commit (e.g. two buyers on
+  `stock=1` leaving `stock=1` with one purchase). A per-store async mutex now
+  serializes them. Only `executeTransaction` takes the lock — regular CRUD and
+  Prisma mode (already ACID via real row locks) are unaffected.
+
+### Verified
+
+- Proven on real PostgreSQL: webhook secrets are stored as `enc:v1:…` (not
+  plaintext) and the HMAC still verifies; memory transactions hold the invariant
+  `stock + successes == initial` under contention (corrupt without the lock);
+  `pushPrismaSchema` creates the tables and the production / no-`DATABASE_URL`
+  guardrails skip without touching the database. **1075 tests** green; `tsc` clean.
+
 ## [0.22.0] - 2026-05-31
 
 Production-hardening release: durable webhooks, include-depth guard, and real
