@@ -5,6 +5,17 @@ All notable changes to `@ludagg/zeroapi-runtime` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.1] - 2026-06-01
+
+### Docs
+
+- **Public-release README** — hero with banner + tagline ("the spec is the
+  source of truth, no drift"), a 30-second quick-start, and an honest feature
+  overview refreshed to the real 0.23.0 surface (SQL-pushdown querying, revocable
+  JWT, durable + encrypted webhooks, soft delete, real `/ready` DB probe,
+  graceful shutdown, opt-in schema-migration helpers). Added a "Proven on real
+  PostgreSQL" section. README + banner only — no code changes.
+
 ## [0.23.0] - 2026-06-01
 
 Security + correctness + deploy-ergonomics release. Completes the audit's
