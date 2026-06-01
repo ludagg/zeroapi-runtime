@@ -115,6 +115,13 @@ export { generateVercelConfig, getVercelDeployButton } from './deploy/external/v
 export { generateFlyConfig, getFlyDeployButton } from './deploy/external/flyio.js'
 export { generatePackageJson, getRequiredDependencies } from './deploy/dependencies.js'
 export type { AggregatedDependency, DependencySource, PackageJsonOptions } from './deploy/dependencies.js'
+export {
+  writePrismaSchema, pushPrismaSchema, deployPrismaMigrations,
+} from './deploy/migrate.js'
+export type {
+  ApplySchemaResult, PushSchemaOptions, DeployMigrationsOptions,
+  SchemaCommandRunner, CommandRunResult,
+} from './deploy/migrate.js'
 
 // ── Query ─────────────────────────────────────────────────────────────────────
 export { parseQueryParams, toPrismaQuery } from './query/builder.js'
