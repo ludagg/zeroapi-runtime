@@ -12,12 +12,51 @@ export interface TxResult {
 }
 
 /**
+ * Per-store transaction mutex (memory mode). Memory transactions snapshot the
+ * store, run their ops across `await` boundaries, then commit or rollback. Two
+ * concurrent transactions could interleave in that window — and a failed one's
+ * rollback would restore a stale snapshot, ERASING a concurrent commit. Prisma
+ * mode is unaffected (it uses `prisma.$transaction` with real row locks).
+ *
+ * We serialize per `DataStore` (one per runtime) via a promise chain: each
+ * transaction waits for the previous one on the same store to fully finish
+ * before it snapshots. Only `executeTransaction` takes the lock — regular CRUD
+ * never does, so nothing else is slowed down.
+ */
+const txLocks = new WeakMap<object, Promise<unknown>>()
+
+async function withStoreLock<T>(store: object, fn: () => Promise<T>): Promise<T> {
+  const prev = txLocks.get(store) ?? Promise.resolve()
+  let release!: () => void
+  const next = new Promise<void>((resolve) => { release = resolve })
+  // The next transaction's `prev` becomes our `next` — it can't start until we release.
+  txLocks.set(store, prev.then(() => next))
+  await prev.catch(() => { /* a prior tx never rejects, but never block on it */ })
+  try {
+    return await fn()
+  } finally {
+    release()
+  }
+}
+
+/**
  * Executes a list of operations atomically against the in-memory store.
  * On any failure the entire set of side-effects is rolled back (snapshot/restore).
+ *
+ * Transactions on the same store are SERIALIZED (per-store mutex) so concurrent
+ * requests can't interleave in the snapshot→commit/rollback window.
  *
  * Equivalent to prisma.$transaction() for the in-memory runtime.
  */
 export async function executeTransaction(
+  operations: TxOperation[],
+  requestBody: Record<string, unknown>,
+  store: DataStore
+): Promise<TxResult> {
+  return withStoreLock(store, () => runTransaction(operations, requestBody, store))
+}
+
+async function runTransaction(
   operations: TxOperation[],
   requestBody: Record<string, unknown>,
   store: DataStore
