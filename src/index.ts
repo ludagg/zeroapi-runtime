@@ -146,6 +146,7 @@ export { generatePresignedPutUrl } from './upload/providers/s3.js'
 // ── Webhooks (Phase 3.3) ──────────────────────────────────────────────────────
 export {
   MemoryWebhookStore, PrismaWebhookStore, tryAutoLoadPrismaWebhookStore,
+  createWebhookSecretCipher, isEncryptedSecret, WEBHOOK_SECRET_ENCRYPTION_KEY_ENV,
   WebhookWorker, computeBackoffDelay, endpointSubscribesTo,
   emitWebhook, buildResourceEventType,
   signPayload, verifySignature, generateWebhookSecret,
@@ -157,7 +158,7 @@ export type {
   WebhookStore, WebhookEndpointRecord, WebhookEventRecord, WebhookEventStatus,
   CreateWebhookEndpointInput, CreateWebhookEventInput,
   ClaimEventsOptions, UpdateAfterAttemptInput,
-  EmitWebhookOptions, WebhookWorkerOptions,
+  EmitWebhookOptions, WebhookWorkerOptions, WebhookSecretCipher,
   AdminRoutesOptions, InboundSourceConfig, InboundRoutesOptions, InboundEventRecord,
   PrismaWebhookLikeClient, PrismaWebhookEndpointDelegate, PrismaWebhookEventDelegate,
   PrismaWebhookEndpointRow, PrismaWebhookEventRow,

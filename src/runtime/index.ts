@@ -53,10 +53,11 @@ import {
 } from '../storage/index.js'
 import {
   MemoryWebhookStore, PrismaWebhookStore, tryAutoLoadPrismaWebhookStore,
+  createWebhookSecretCipher,
   WebhookWorker, emitWebhook as emitWebhookImpl,
   mountWebhookAdminRoutes, mountWebhookInboundRoutes,
   type WebhookStore, type WebhookWorkerOptions, type InboundSourceConfig,
-  type InboundRoutesOptions, type PrismaWebhookLikeClient,
+  type InboundRoutesOptions, type PrismaWebhookLikeClient, type WebhookSecretCipher,
 } from '../webhooks/index.js'
 import {
   cascadeSystemResourceDelete, cascadeSystemResourceDeletePrisma,
@@ -177,6 +178,15 @@ export interface RuntimeOptions {
   webhookInboundSources?: InboundSourceConfig[]
   /** Phase 3.3: forwarded to `mountWebhookInboundRoutes` — onEvent, log, eventLog. */
   webhookInboundOptions?: InboundRoutesOptions
+  /**
+   * Key used to encrypt webhook signing secrets at rest (AES-256-GCM). Falls
+   * back to `process.env.WEBHOOK_SECRET_ENCRYPTION_KEY`. When neither is set,
+   * secrets are stored in clear (a one-time warning is logged). Legacy plaintext
+   * secrets keep working after a key is added (no migration needed).
+   */
+  webhookSecretEncryptionKey?: string
+  /** Receives the "secrets stored in clear" warning. Defaults to `console.warn`. */
+  webhookSecretWarningLogger?: (line: string) => void
 }
 
 export interface RuntimeResult {
@@ -271,6 +281,8 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
     webhookWorkerAutostart = true,
     webhookInboundSources = [],
     webhookInboundOptions,
+    webhookSecretEncryptionKey,
+    webhookSecretWarningLogger,
   } = options
 
   // Chantier 4: Fail fast on missing env vars (legacy spec.requiredEnv)
@@ -439,6 +451,19 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
   let webhookEmitter: ((eventType: string, payload: unknown) => void) | undefined
 
   if (webhooksEnabled) {
+    // Webhook signing-secret encryption at rest. A key (option or
+    // WEBHOOK_SECRET_ENCRYPTION_KEY) enables AES-256-GCM; without one secrets
+    // are stored in clear (legacy/dev) — warn once so operators can opt in.
+    const encKey = webhookSecretEncryptionKey ?? process.env['WEBHOOK_SECRET_ENCRYPTION_KEY']
+    const secretCipher = encKey ? createWebhookSecretCipher(encKey) : undefined
+    if (!secretCipher && outboundEvents.size > 0) {
+      const warn = webhookSecretWarningLogger ?? ((l: string) => console.warn(l))
+      warn(
+        '⚠️  ZeroAPI — webhook signing secrets are stored in CLEAR text. ' +
+        'Set WEBHOOK_SECRET_ENCRYPTION_KEY to encrypt them at rest (AES-256-GCM).',
+      )
+    }
+
     // Durable store when Prisma is active (reuse the already-resolved client so
     // we never spin up a second PrismaClient); autodetect; else in-memory.
     const wStore = resolveWebhookStore({
@@ -446,6 +471,7 @@ export function createRuntime(spec: ZeroAPISpec, options: RuntimeOptions = {}): 
       ...(resourceStoreProvider.prismaClient?.()
         ? { prismaClient: resourceStoreProvider.prismaClient() as unknown as PrismaWebhookLikeClient }
         : {}),
+      ...(secretCipher ? { cipher: secretCipher } : {}),
     })
     const wWorker = new WebhookWorker(wStore, webhookWorkerOptions ?? {})
 
@@ -660,10 +686,12 @@ function resolveResourceStore(opts: {
 function resolveWebhookStore(opts: {
   providedWebhookStore?: WebhookStore
   prismaClient?: PrismaWebhookLikeClient
+  cipher?: WebhookSecretCipher
 }): WebhookStore {
+  // An explicitly-provided store owns its own secret handling — don't second-guess it.
   if (opts.providedWebhookStore) return opts.providedWebhookStore
-  if (opts.prismaClient) return new PrismaWebhookStore(opts.prismaClient)
-  return tryAutoLoadPrismaWebhookStore() ?? new MemoryWebhookStore()
+  if (opts.prismaClient) return new PrismaWebhookStore(opts.prismaClient, opts.cipher)
+  return tryAutoLoadPrismaWebhookStore(opts.cipher) ?? new MemoryWebhookStore(opts.cipher)
 }
 
 /**

@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module'
 import { PrismaWebhookStore, type PrismaWebhookLikeClient } from './prisma-store.js'
 import type { WebhookStore } from './store.js'
+import type { WebhookSecretCipher } from './secret-cipher.js'
 
 declare const require: NodeRequire | undefined
 
@@ -24,7 +25,7 @@ function resolveRequire(): NodeRequire | null {
  * when Prisma is unavailable (missing module, no `DATABASE_URL`, broken client),
  * exactly like `tryAutoLoadPrismaApiKeyStore` — the caller falls back to memory.
  */
-export function tryAutoLoadPrismaWebhookStore(): WebhookStore | null {
+export function tryAutoLoadPrismaWebhookStore(cipher?: WebhookSecretCipher): WebhookStore | null {
   if (!process.env['DATABASE_URL']) return null
   const req = resolveRequire()
   if (!req) return null
@@ -32,7 +33,7 @@ export function tryAutoLoadPrismaWebhookStore(): WebhookStore | null {
     const mod = req('@prisma/client') as { PrismaClient?: new () => PrismaWebhookLikeClient }
     if (!mod?.PrismaClient) return null
     const client = new mod.PrismaClient()
-    return new PrismaWebhookStore(client)
+    return new PrismaWebhookStore(client, cipher)
   } catch {
     return null
   }
