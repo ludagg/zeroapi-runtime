@@ -1,14 +1,27 @@
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/ludagg/zeroapi-runtime/main/assets/banner.png" alt="zeroapi-runtime — the spec is the source of truth, no drift" width="640" />
+
 # @ludagg/zeroapi-runtime
 
-> Generate a complete, secured, tested REST API from a single JSON spec — no scaffolding, no boilerplate.
+**Generate a complete, production-ready backend API from a single JSON spec.**
+*The spec is the source of truth. No drift.*
 
 [![npm version](https://img.shields.io/npm/v/@ludagg/zeroapi-runtime.svg)](https://www.npmjs.com/package/@ludagg/zeroapi-runtime)
 [![license](https://img.shields.io/npm/l/@ludagg/zeroapi-runtime.svg)](#license)
 [![tests](https://img.shields.io/badge/tests-1075%20passing-brightgreen.svg)](#development)
+[![proven on PostgreSQL](https://img.shields.io/badge/proven%20on-real%20PostgreSQL-336791.svg)](./REAL_DB_TEST.md)
 
-`@ludagg/zeroapi-runtime` is the standardized runtime engine for the **ZeroAPI** platform. You describe *what* your API contains — resources, fields, relations, auth, permissions — in a declarative **Spec (DSL)**, and the runtime produces a fully wired [Hono](https://hono.dev) application: CRUD routes, Zod validation, authentication, RBAC, OpenAPI docs, and more.
+</div>
 
-Because it builds on Hono, the same app runs unchanged on **Node.js, Bun, Deno, and Cloudflare Workers**.
+You describe **what** your API contains — resources, fields, relations, auth, permissions — in one declarative **Spec (DSL)**. The runtime produces the whole backend: CRUD routes, validation, authentication, RBAC, relations, webhooks, OpenAPI docs, and more.
+
+Hand-written backends drift from their design the moment you start typing. ZeroAPI removes the gap: the spec **is** the running API, so the contract and the implementation can never disagree. It's not a scaffolder you run once and edit — it's a runtime engine you keep feeding the spec.
+
+- 🧩 **Spec-driven** — one JSON object describes the entire API surface; no boilerplate to maintain.
+- 🚀 **Production-ready** — SQL-pushdown queries, revocable JWT auth, durable + encrypted webhooks, multi-tenant isolation, graceful shutdown — not a toy.
+- 🪶 **Portable** — built on [Hono](https://hono.dev), so the same app runs unchanged on **Node.js, Bun, Deno, and Cloudflare Workers**.
+- 🧪 **Proven** — **1075 tests**, and every database-mode feature verified against **real PostgreSQL** (not a mock).
 
 ```ts
 import { parseSpec, createRuntime } from '@ludagg/zeroapi-runtime'
@@ -22,17 +35,17 @@ const spec = parseSpec({
       fields: {
         title:   { type: 'string', required: true },
         content: { type: 'text',   required: false },
-        status:  { type: 'string', required: true, default: 'draft' },
+        status:  { type: 'enum',   values: ['draft', 'published'], default: 'draft' },
       },
     },
   ],
 })
 
 const { app } = createRuntime(spec)
-export default app   // Hono app — works on Node, Bun, Cloudflare Workers
+export default app   // a Hono app — runs on Node, Bun, Deno, Cloudflare Workers
 ```
 
-That's it. You get `GET/POST /posts`, `GET/PUT/DELETE /posts/:id`, Zod validation on every write, interactive OpenAPI docs at `/docs`, and a `/health` probe.
+That's the whole backend. You get `GET/POST /posts`, `GET/PUT/DELETE /posts/:id`, Zod validation on every write, filtering/sorting/search/pagination, interactive OpenAPI docs at `/docs`, and `/health` + `/ready` probes — in memory for prototyping, or backed by Postgres (Prisma) for production with **zero route changes**.
 
 ---
 
@@ -54,6 +67,8 @@ That's it. You get `GET/POST /posts`, `GET/PUT/DELETE /posts/:id`, Zod validatio
   - [API keys](#api-keys)
   - [OAuth](#oauth)
 - [Authorization (RBAC & permissions)](#authorization-rbac--permissions)
+- [State machines (workflows)](#state-machines-workflows)
+- [Aggregates](#aggregates)
 - [File upload & storage](#file-upload--storage)
 - [Webhooks](#webhooks)
 - [Lifecycle hooks & custom endpoints](#lifecycle-hooks--custom-endpoints)
@@ -66,6 +81,7 @@ That's it. You get `GET/POST /posts`, `GET/PUT/DELETE /posts/:id`, Zod validatio
 - [Built-in endpoints](#built-in-endpoints)
 - [Examples](#examples)
 - [Known limitations](#known-limitations)
+- [Proven on real PostgreSQL](#proven-on-real-postgresql)
 - [Development](#development)
 - [Publishing](#publishing)
 - [License](#license)
@@ -177,15 +193,14 @@ Open `http://localhost:3000/docs` for the interactive API reference.
 |---|---|
 | **CRUD routes** | Full REST for every resource, auto-pluralised (`Post` → `/posts`) |
 | **Validation** | Zod schemas generated from field definitions, applied on every write |
-| **Relations** | `manyToOne`, `oneToMany`, `manyToMany`, `oneToOne` — Prisma schema + `?include=` |
-| **Filtering** | `?field[contains]=`, `[eq]`, `[gte]`, `[lte]`, `[in]`, `[startsWith]`, … |
-| **Sorting** | `?sort=field:asc,field2:desc` (multi-field) |
-| **Full-text search** | `?q=` across declared `searchable` fields |
-| **Pagination** | Cursor-based (`?cursor=id&limit=20`), stable across requests |
-| **Transactions** | Spec-level atomic ops (increment, decrement, create, delete) — `409` on failure |
+| **Relations** | `manyToOne`, `oneToMany`, `manyToMany`, `oneToOne` — Prisma schema + nested `?include=` (depth-capped), atomic `onDelete` cascade |
+| **Querying (SQL pushdown)** | Filter (`[eq] [ne] [gt] [gte] [lt] [lte] [contains] [startsWith] [endsWith] [in] [notin]`), sort, search (`?q=`), pagination — all pushed to a single SQL query in Prisma mode (no full-table scans) |
+| **Pagination** | Cursor (`?cursor=`) **and** offset (`?page=`), with a real SQL `COUNT` |
+| **Soft delete** | `softDelete: true` → `DELETE` sets `deletedAt`; reads hide it; `?includeDeleted=true` to opt back in |
+| **Transactions** | Spec-level atomic ops (increment, decrement, create, delete) — `409` on failure; ACID in Prisma, serialized in memory |
 | **File upload** | `file` / `file[]` field types, local / S3 / R2 providers, MIME + size validation |
-| **Webhooks** | Outbound HMAC-signed events with retry + admin endpoints; inbound signature verification |
-| **Auth — JWT** | Full user system: register, login, refresh, logout, `/auth/me` |
+| **Webhooks** | Outbound HMAC-signed events with retry — **durable** (survive restart, no double-delivery), **secrets encrypted at rest**; inbound signature verification |
+| **Auth — JWT** | Full user system: register, login, refresh, logout, `/auth/me` — **access tokens are revocable** (logout / user deletion cut sessions) |
 | **Auth — API keys** | Hashed keys, admin management routes, bootstrap on first boot |
 | **Auth — OAuth** | Google, GitHub, Apple authorization-code flow with account linking |
 | **Auth flows** | Email verification, password reset, refresh rotation, revocation, lockout |
@@ -194,14 +209,16 @@ Open `http://localhost:3000/docs` for the interactive API reference.
 | **Multi-tenant** | Declarative tenant isolation via `scope` (column ↔ JWT claim) — reads scoped, writes forced to the tenant, cross-tenant access 404s |
 | **State machines** | Declarative `stateMachine` on an enum field — allowed transitions + per-role gating, enforced on update (`409`/`403`) |
 | **Aggregates** | Declarative `count` / `sum` / `avg` / `min` / `max` over relations, opt-in via `?include=` — batched (no N+1) |
-| **Security** | Helmet headers, CORS, rate limiting (memory or Redis), JSON sanitisation |
+| **Security** | Helmet headers, CORS, rate limiting (memory or Redis), JSON sanitisation, per-IP rate limit on `/auth/login` + `/auth/register` |
 | **OpenAPI** | 3.0.3 spec at `/openapi.json`, Scalar UI at `/docs` |
 | **Postman** | Generate a Postman v2.1 collection from the spec |
 | **SDK generation** | Emit a typed TypeScript client for the API |
-| **Observability** | Request-ID middleware, structured logger, `/health` (uptime), `/ready` |
+| **Observability** | Request-ID middleware, structured logger, `/health` (uptime), `/ready` (**real DB probe** → `503` when the DB is down) |
+| **Graceful shutdown** | `shutdown()` stops the webhook worker + disconnects Prisma; opt-in `SIGTERM`/`SIGINT` binding |
 | **Env management** | Aggregate required env vars, generate `.env.example`, validate at boot |
+| **Schema migration** | Opt-in, non-destructive helpers — `writePrismaSchema`, `pushPrismaSchema` (dev), `deployPrismaMigrations` (prod) |
 | **Deploy configs** | Railway, Render, Vercel, Fly.io generators + deploy buttons |
-| **Persistence** | In-memory by default; Prisma-backed stores for production |
+| **Persistence** | In-memory by default; Prisma-backed stores for production (resources, auth, webhooks) |
 
 ---
 
@@ -356,7 +373,9 @@ GET /products?sku[in]=ELEC-001,ELEC-002,ELEC-003
 GET /products?name[startsWith]=Pro
 ```
 
-Supported operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains`, `startsWith`, `endsWith`, `in`.
+Supported operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains`, `startsWith`, `endsWith`, `in`, `notin`.
+
+> **In Prisma mode, all of this is pushed down to SQL** — filtering, search, sorting and pagination become one `WHERE / ORDER BY / LIMIT / OFFSET` query plus a real `COUNT(*)`. The database never ships the whole table to Node, and filter values are coerced to the column type. Unknown fields/operators are rejected with a `400` before any query runs.
 
 ### Sorting
 
@@ -373,14 +392,18 @@ When a resource declares `searchable` fields and `features.search.enabled` is `t
 GET /products?q=wireless        # case-insensitive substring match across searchable fields
 ```
 
-### Cursor pagination
+### Pagination (cursor or offset)
 
 ```
+# cursor — keyset, stable for infinite scroll
 GET /products?sort=price:asc&limit=5
-→ { data: [...], nextCursor: 'abc123' }
-
+→ { data: [...], count: 42, pagination: {…}, nextCursor: 'abc123' }
 GET /products?sort=price:asc&limit=5&cursor=abc123
 → { data: [...], nextCursor: 'def456' }
+
+# offset — classic page numbers
+GET /products?page=3&limit=20
+→ { data: [...], count: 42, pagination: { page: 3, totalPages: 3, hasNext: false, … } }
 ```
 
 > **Tip:** add `id` as a secondary sort key (`?sort=price:asc,id:asc`) to guarantee a stable total order across pages — see [Known limitations](#known-limitations).
@@ -643,8 +666,10 @@ features: {
 **Outbound.** The runtime:
 
 - Mounts admin routes — `POST /admin/webhooks`, `GET /admin/webhooks`, `DELETE /admin/webhooks/:id`, `GET /admin/webhooks/:id/deliveries` — to manage endpoints. Secrets are returned **only** at creation.
-- Runs an in-process worker that POSTs queued events to each subscribed endpoint with `X-Webhook-Signature` (HMAC-SHA256 of the JSON body), `X-Webhook-Event`, and `X-Webhook-Id`. Failed deliveries retry with exponential backoff (30s → 30min cap, 5 attempts by default), with a 2-minute lock TTL for multi-replica safety.
-- Call `runtime.webhooks?.worker.stop()` on shutdown.
+- Runs an in-process worker that POSTs queued events to each subscribed endpoint with `X-Webhook-Signature` (HMAC-SHA256 of the JSON body), `X-Webhook-Event`, and `X-Webhook-Id`. Failed deliveries retry with exponential backoff (30s → 30min cap, 5 attempts by default).
+- **Durable in production** — with Prisma, endpoints and the delivery queue persist to the database (auto-wired), so they **survive a restart** and the worker resumes pending deliveries. The claim is locked atomically, so running multiple replicas **never double-delivers** an event.
+- **Secrets encrypted at rest** — set `WEBHOOK_SECRET_ENCRYPTION_KEY` (or `webhookSecretEncryptionKey`) and signing secrets are stored AES-256-GCM-encrypted (`enc:v1:…`), decrypted only to sign. Without a key they stay in clear (with a warning); pre-existing plaintext secrets keep working — no migration.
+- Stop cleanly via `await runtime.shutdown()` (also disconnects Prisma).
 
 **Inbound.** Mounts `POST /webhooks/inbound/:source` per declared source. Verifies the HMAC signature against `${SOURCE}_WEBHOOK_SECRET` (mismatch → `401`). Provider-specific headers (e.g. `Stripe-Signature`) can be wired via the `webhookInboundSources` option.
 
@@ -747,7 +772,8 @@ Always-on, zero-config observability:
 
 - **Request ID** — every request gets a correlation ID (response header + log context).
 - **`GET /health`** — `{ status, name, version, uptime, configCheck }`. `configCheck` reports the *names* of any missing required env vars (never values).
-- **`GET /ready`** — readiness probe for orchestrators.
+- **`GET /ready`** — a **real readiness probe**: in Prisma mode it runs a light `SELECT 1` and returns **`503`** when the database is unreachable, so an orchestrator stops routing traffic to a broken instance (memory mode → `200`).
+- **Graceful shutdown** — `await runtime.shutdown()` stops the webhook worker (in-flight deliveries finish, none are cut) and disconnects Prisma; idempotent, no-op in memory. Pass `handleSignals: true` to bind `SIGTERM`/`SIGINT` automatically.
 - **Structured logger** — `createLogger({ level })`; set the floor with `createRuntime(spec, { logLevel: 'debug' })`.
 
 ---
@@ -787,7 +813,28 @@ createRuntime(spec, {
 })
 ```
 
-The generated `prismaSchema` (see below) is the source of truth for your database — run `prisma migrate` against it.
+The generated `prismaSchema` (see below) is the source of truth for your database.
+
+### Applying the schema (opt-in, never destructive)
+
+`createRuntime` **never touches the database on its own** — applying the schema is always an explicit step. Helpers reduce the friction safely:
+
+```ts
+import { writePrismaSchema, pushPrismaSchema, deployPrismaMigrations } from '@ludagg/zeroapi-runtime'
+
+// write the generated schema to disk (pure I/O — the basis for any prisma command)
+writePrismaSchema(spec, 'prisma/schema.prisma')
+
+// DEV / prototype — sync the database to the schema (creates tables)
+await pushPrismaSchema({ spec })
+//   ↳ skipped without DATABASE_URL · refused in NODE_ENV=production unless allowProduction:true
+//   ↳ never passes --accept-data-loss unless acceptDataLoss:true (Prisma refuses destructive changes)
+
+// PRODUCTION — apply committed, versioned migrations (non-destructive by construction)
+await deployPrismaMigrations({ schemaPath: 'prisma/schema.prisma' })
+```
+
+Use `pushPrismaSchema` for dev/prototyping; for production, commit migrations (`prisma migrate dev` against the generated schema) and ship them with `deployPrismaMigrations` / `prisma migrate deploy`.
 
 ---
 
@@ -836,24 +883,30 @@ const result = createRuntime(spec, {
   uploadDir: './uploads',
   storageProvider,         // override auto-resolved provider
 
-  // ── Observability ───────────────────────────────────────────────────
+  // ── Observability & lifecycle ───────────────────────────────────────
   logLevel: 'info',
+  handleSignals: false,    // bind SIGTERM/SIGINT → shutdown() (opt-in)
+
+  // ── Querying ────────────────────────────────────────────────────────
+  maxIncludeDepth: 4,      // cap nested ?include= depth (400 beyond it)
 
   // ── Rate limiting ───────────────────────────────────────────────────
   rateLimitStore,          // e.g. RedisRateLimitStore for multi-instance
+  authRateLimit: { windowMs: 15 * 60_000, max: 20 },  // per-IP on /auth/login + /auth/register (or false)
 
   // ── Env validation ──────────────────────────────────────────────────
   validateEnv: false,      // enforce spec.requiredEnv at boot
 
   // ── Persistence (Prisma) ────────────────────────────────────────────
-  prisma,                  // backs API-key store
+  prisma,                  // backs API-key + resource + webhook stores
   prismaJwt,               // backs user + refresh-token stores
-  apiKeyStore, userStore, refreshTokenStore,   // explicit overrides
+  apiKeyStore, userStore, refreshTokenStore, revocationStore,   // explicit overrides
   oauthAccountStore, oauthStateStore,
 
   // ── Webhooks ────────────────────────────────────────────────────────
   webhookStore, webhookWorkerOptions, webhookWorkerAutostart,
   webhookInboundSources, webhookInboundOptions,
+  webhookSecretEncryptionKey,   // AES-256-GCM at rest (or WEBHOOK_SECRET_ENCRYPTION_KEY)
 })
 ```
 
@@ -868,6 +921,7 @@ const result = createRuntime(spec, {
 | `testSuite` | `string` | generated Vitest suite |
 | `spec` | `ZeroAPISpec` | the parsed spec |
 | `ready` | `Promise<void>` | resolves once async boot (e.g. API-key bootstrap) completes |
+| `shutdown` | `() => Promise<void>` | graceful shutdown — stop the webhook worker + disconnect Prisma (idempotent) |
 | `webhooks?` | `{ store, worker }` | present when webhooks are enabled |
 | `deleteSystemResource?` | `(name, id) => Promise<CascadeResult>` | cascade-aware delete for system resources (e.g. `User`) |
 
@@ -916,7 +970,7 @@ npx tsx examples/ecommerce-api/index.ts
 
 These are current design boundaries, not bugs.
 
-1. **Many-to-many filtering is not supported.** `?field[op]=value` filters operate on the resource's own stored fields; M2M relation data lives in a join table that isn't resolved at filter time. *Workaround:* `?include=Tag` and filter client-side, or query the join resource directly.
+1. **Many-to-many filtering is membership-only.** In Prisma mode you can filter by a related id — `?tag=<tagId>` (translated to a `some` join clause) — but operator-style filters (`?tag[contains]=…`) on join-table data aren't resolved. *Workaround:* `?include=Tag` and filter client-side, or query the join resource directly.
 
 2. **Cursor pagination with non-unique sort keys.** If several rows share a sort-key value and that group straddles a page boundary, ordering among equals isn't guaranteed identical across requests. *Fix:* add `id` as a secondary sort (`?sort=price:asc,id:asc`) for a stable total order.
 
@@ -931,6 +985,12 @@ These are current design boundaries, not bugs.
 7. **After-hooks are fire-and-forget.** Failures are silently discarded — pair with a job queue if you need guaranteed delivery.
 
 8. **Default rate limiter is single-instance.** Use `RedisRateLimitStore` for multi-instance deployments.
+
+---
+
+## Proven on real PostgreSQL
+
+The Prisma-mode features aren't tested against a mock — they're verified against a **real PostgreSQL database**. The scripts in [`realdb/`](./realdb) spin up the generated schema and assert real behaviour: SQL query pushdown (logged `WHERE`/`ORDER BY`/`LIMIT` + `EXPLAIN`), relation cascades inside one `$transaction`, webhook persistence + no-double-delivery under concurrent workers, encrypted-at-rest secrets (`enc:v1:…` in the DB), token revocation, `/ready` flipping `200 → 503 → 200` as the cluster stops/restarts, and migration helpers creating tables (with their safety guardrails). See [`REAL_DB_TEST.md`](./REAL_DB_TEST.md) for the methodology.
 
 ---
 
